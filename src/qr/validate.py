@@ -3,8 +3,10 @@
 Each ``check_*`` function is pure: it takes one symbol's unadjusted bars and returns a
 list of findings. ``validate_symbols`` runs them all against the database and replaces
 the stored findings, so the ``quality_issues`` table always shows the current state.
-Provider revisions (check name ``revision``) are written by ingestion and are never
-cleared: they are a history of events, not a state.
+Two kinds of finding are written by ingestion instead and are never cleared, because
+they record events in a provider response rather than the state of stored data:
+``revision`` (the provider changed history) and ``duplicate_bar`` (a response repeated a
+date; only one row can be stored).
 """
 
 from __future__ import annotations
@@ -37,7 +39,6 @@ STATE_CHECKS = (
     "ohlc_consistency",
     "non_positive_price",
     "negative_volume",
-    "duplicate_bar",
     "gap",
     "unexpected_session",
     "outlier_return",
@@ -45,6 +46,7 @@ STATE_CHECKS = (
     "zero_volume_streak",
 )
 REVISION_CHECK = "revision"
+DUPLICATE_CHECK = "duplicate_bar"
 
 
 def _day(value: Any) -> date:
@@ -117,7 +119,7 @@ def check_duplicates(symbol: str, bars: pd.DataFrame) -> list[QualityIssue]:
     """
     counts = bars.groupby("date").size()
     return [
-        QualityIssue(symbol, _day(day), "duplicate_bar", ERROR, f"{count} bars for the same date")
+        QualityIssue(symbol, _day(day), DUPLICATE_CHECK, ERROR, f"{count} bars for the same date")
         for day, count in counts[counts > 1].items()
     ]
 

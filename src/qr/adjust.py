@@ -7,8 +7,11 @@ that the series is continuous across corporate actions:
   ``r`` and every volume before ``t`` is multiplied by ``r``.
 * **Cash dividend** ``D`` with ex-date ``t``: every price before ``t`` is multiplied by
   ``1 - D / C`` where ``C`` is the close of the last session before ``t``. This is the
-  factor that makes the adjusted close-to-close return over the ex-date equal the
-  total return ``(close_t + D) / C - 1``.
+  convention Yahoo's "Adj Close" and most vendors use. It treats the dividend as
+  reinvested at the theoretical ex-dividend price ``C - D``, so the adjusted return
+  over the ex-date is ``close_t / (C - D) - 1``. That differs from the cash-accounting
+  return ``(close_t + D) / C - 1`` by a second-order term (about dividend yield times
+  that day's price move, typically well under a basis point).
 
 Volumes are adjusted for splits only (the usual convention).
 """
