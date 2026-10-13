@@ -192,16 +192,17 @@ def run_ingest(
     data_directory: Path | str | None = None,
     symbols: Sequence[str] | None = None,
     sources: Mapping[str, DataSource] | None = None,
-    clock: Callable[[], datetime] = storage.utcnow,
+    clock: Callable[[], datetime] | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> IngestReport:
     """Incrementally download the universe (or just ``symbols``) into the local store.
 
     ``sources`` overrides the providers built from the config (used by tests), ``clock``
-    supplies naive-UTC "now". Quality checks run afterwards for every symbol that was
-    written. Check ``report.failed`` to decide the process exit code.
+    supplies naive-UTC "now" (default: ``storage.utcnow``). Quality checks run afterwards
+    for every symbol that was written. Check ``report.failed`` to decide the exit code.
     """
     report = IngestReport(run_id=uuid.uuid4().hex[:12])
+    clock = clock or storage.utcnow
     built: dict[str, DataSource] = dict(sources or {})
     raw_root = raw_dir(data_directory)
 

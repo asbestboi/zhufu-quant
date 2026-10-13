@@ -49,6 +49,7 @@ markers = ["network: hits a real data provider (skipped unless --run-network is 
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+extend-exclude = ["docs"]  # specs are hand-off documents, not ours to reformat
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
