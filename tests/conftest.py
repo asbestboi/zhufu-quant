@@ -50,7 +50,9 @@ class FakeSource(DataSource):
         self,
         bars: dict[str, pd.DataFrame] | None = None,
         actions: dict[str, pd.DataFrame] | None = None,
+        name: str = "yahoo",
     ) -> None:
+        self.name = name
         self.bars = bars or {}
         self.actions = actions or {}
         self.calls: list[tuple[str, date, date]] = []

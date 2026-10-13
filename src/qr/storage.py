@@ -316,12 +316,26 @@ def insert_quality_issues(
     )
 
 
-def delete_quality_issues(con: Connection, symbol: str, check_names: Sequence[str]) -> None:
-    """Remove a symbol's findings for the given checks (used before re-running them)."""
-    con.execute(
-        "DELETE FROM quality_issues WHERE symbol = ? AND list_contains(?, check_name)",
-        [symbol, list(check_names)],
-    )
+def delete_quality_issues(
+    con: Connection,
+    symbol: str,
+    check_names: Sequence[str],
+    start: date | None = None,
+    end: date | None = None,
+) -> None:
+    """Remove a symbol's findings for the given checks (used before re-running them).
+
+    With ``start`` / ``end``, only findings dated inside that inclusive range are removed.
+    """
+    query = "DELETE FROM quality_issues WHERE symbol = ? AND list_contains(?, check_name)"
+    params: list[object] = [symbol, list(check_names)]
+    if start is not None:
+        query += " AND date >= ?"
+        params.append(start)
+    if end is not None:
+        query += " AND date <= ?"
+        params.append(end)
+    con.execute(query, params)
 
 
 def read_quality_issues(con: Connection, symbols: Sequence[str] | None = None) -> pd.DataFrame:
