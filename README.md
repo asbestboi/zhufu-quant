@@ -31,8 +31,6 @@ features come after.
 | 3 | Strategy research, starting with a pairs-trading study | Planned |
 | 4 | Paper trading, then possibly live trading | Planned |
 
-The hand-off specs for each step are in [`docs/specs/`](docs/specs).
-
 ## Setup
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
@@ -438,9 +436,6 @@ uv run pre-commit install       # once: run the checks on every commit
 ```
 
 Tests use small static CSVs in `tests/fixtures/` and never touch the network.
-`notebooks/01_explore_data.ipynb` loads SPY, plots adjusted against unadjusted closes, and
-shows the validation summary; it is committed with its outputs so the charts show on
-GitHub. Open it with `uv run --with jupyterlab jupyter lab`.
 
 Continuous integration (`.github/workflows/ci.yml`) runs the lint, format, type, and test
 commands above on Ubuntu and Windows with Python 3.12 and 3.13 for every push and pull

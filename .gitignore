@@ -17,7 +17,9 @@ build/
 .mypy_cache/
 .ruff_cache/
 
-# Notebooks
+# Notebooks and Claude Code specs: kept locally, not published
+notebooks/
+docs/specs/
 .ipynb_checkpoints/
 
 # Output of the scheduled daily run
