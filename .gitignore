@@ -19,3 +19,6 @@ build/
 
 # Notebooks
 .ipynb_checkpoints/
+
+# Output of the scheduled daily run
+logs/
