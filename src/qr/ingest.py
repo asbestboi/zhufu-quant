@@ -2,6 +2,10 @@
 
 For every instrument: work out the date window, fetch, snapshot the raw response, record
 provider revisions, upsert, and log the outcome. One symbol failing never stops the run.
+
+A provider that is down is a different matter: retrying every symbol against it would
+take half a minute each. So each source gets a connectivity probe before the run and a
+circuit breaker during it (see ``run_ingest``).
 """
 
 from __future__ import annotations
@@ -49,11 +53,13 @@ class IngestReport:
 
     run_id: str
     results: list[SymbolResult] = field(default_factory=list)
+    # Sources found unreachable, with the reason; their symbols were skipped.
+    sources_down: dict[str, str] = field(default_factory=dict)
 
     @property
     def failed(self) -> bool:
-        """True if any symbol failed or came back incomplete."""
-        return any(r.status in (FAILED, PARTIAL) for r in self.results)
+        """True if any symbol failed or came back incomplete, or a source was down."""
+        return bool(self.sources_down) or any(r.status in (FAILED, PARTIAL) for r in self.results)
 
 
 def build_source(name: str, config: UniverseConfig) -> DataSource:
@@ -137,8 +143,13 @@ def _ingest_symbol(
         return SymbolResult(symbol, OK, 0, f"nothing to fetch ({start} is after {end})")
 
     logger.info("%s: fetching %s to %s from %s", symbol, start, end, source.name)
-    bars = normalize_bars(source.fetch_daily(symbol, start, end))
-    actions = normalize_actions(source.fetch_corporate_actions(symbol))
+    try:
+        bars = normalize_bars(source.fetch_daily(symbol, start, end))
+        actions = normalize_actions(source.fetch_corporate_actions(symbol))
+    except SourceError:
+        raise
+    except Exception as exc:  # anything a provider throws is a download failure
+        raise SourceError(f"{type(exc).__name__}: {exc}") from exc
     if bars.empty:
         raise SourceError(f"{source.name} returned no rows for {symbol}")
 
@@ -200,6 +211,19 @@ def run_ingest(
     ``sources`` overrides the providers built from the config (used by tests), ``clock``
     supplies naive-UTC "now" (default: ``storage.utcnow``). Quality checks run afterwards
     for every symbol that was written. Check ``report.failed`` to decide the exit code.
+
+    Failing fast when a provider is down:
+
+    - Before anything is downloaded, every source that is about to be used is probed with
+      one cheap request. If the probe fails, all of that source's symbols are skipped.
+    - During the run, a download failure cannot be told apart reliably from a bad ticker
+      (Yahoo answers both with "no timezone found"). So failures are counted per source,
+      and a success resets the count. When ``ingest.max_consecutive_failures`` symbols in
+      a row have failed, the source is probed again: if the probe fails too the source
+      is down and its remaining symbols are skipped; if it succeeds the failures were
+      about those symbols and the run carries on.
+
+    Either way the source ends up in ``report.sources_down`` and the run counts as failed.
     """
     report = IngestReport(run_id=uuid.uuid4().hex[:12])
     clock = clock or storage.utcnow
@@ -231,25 +255,66 @@ def run_ingest(
             else:
                 selected.append(found)
 
+        def probe_failure(name: str) -> str | None:
+            """Why ``name`` is unreachable, or None if it answered (or cannot be built)."""
+            try:
+                if name not in built:
+                    built[name] = build_source(name, config)
+            except Exception:
+                return None  # a set-up problem, reported per symbol below
+            try:
+                built[name].probe()
+            except Exception as exc:
+                return str(exc)
+            return None
+
+        down = report.sources_down
+        for name in dict.fromkeys(i.source for i in selected if config.source_enabled(i.source)):
+            reason = probe_failure(name)
+            if reason is not None:
+                down[name] = reason
+                logger.error("source '%s' is unreachable, skipping its symbols: %s", name, reason)
+
         fetched_from: set[str] = set()
+        failures_in_a_row: dict[str, int] = {}
         for instrument in selected:
             symbol = instrument.symbol
+            name = instrument.source
             started = clock()
-            if not config.source_enabled(instrument.source):
-                result = SymbolResult(symbol, SKIPPED, 0, f"source '{instrument.source}' disabled")
+            if not config.source_enabled(name):
+                result = SymbolResult(symbol, SKIPPED, 0, f"source '{name}' disabled")
                 logger.info("%s: skipped (%s)", symbol, result.message)
+            elif name in down:
+                result = SymbolResult(symbol, SKIPPED, 0, f"source '{name}' is down")
+                logger.warning("%s: skipped (%s)", symbol, result.message)
             else:
-                if instrument.source == "yahoo" and "yahoo" in fetched_from:
+                if name == "yahoo" and "yahoo" in fetched_from:
                     sleep(config.sources.yahoo.request_delay_seconds)
-                fetched_from.add(instrument.source)
+                fetched_from.add(name)
+                download_failed = False
                 try:
-                    if instrument.source not in built:
-                        built[instrument.source] = build_source(instrument.source, config)
-                    result = _ingest_symbol(
-                        con, instrument, built[instrument.source], config, raw_root, started
-                    )
+                    if name not in built:
+                        built[name] = build_source(name, config)
+                    result = _ingest_symbol(con, instrument, built[name], config, raw_root, started)
+                except SourceError as exc:
+                    download_failed = True
+                    result = SymbolResult(symbol, FAILED, 0, f"{type(exc).__name__}: {exc}")
                 except Exception as exc:  # fault isolation: log it and move on
                     result = SymbolResult(symbol, FAILED, 0, f"{type(exc).__name__}: {exc}")
+
+                failures_in_a_row[name] = (
+                    failures_in_a_row.get(name, 0) + 1 if download_failed else 0
+                )
+                if failures_in_a_row[name] >= config.ingest.max_consecutive_failures:
+                    reason = probe_failure(name)
+                    if reason is None:
+                        logger.info("source '%s' still answers; the failures are per symbol", name)
+                        failures_in_a_row[name] = 0
+                    else:
+                        down[name] = (
+                            f"{failures_in_a_row[name]} symbols in a row failed, then: {reason}"
+                        )
+                        logger.error("source '%s' is down, skipping the rest: %s", name, reason)
                 if result.status == FAILED:
                     logger.error("%s: failed: %s", symbol, result.message)
                 elif result.status == PARTIAL:

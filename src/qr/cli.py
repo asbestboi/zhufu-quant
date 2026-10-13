@@ -144,8 +144,14 @@ def ingest(
     console.print(table)
     with storage.connect(db_path(data_dir), read_only=True) as con:
         _print_issue_summary(storage.read_quality_issues(con))
+    for source, reason in report.sources_down.items():
+        console.print(
+            f"[red]error:[/red] could not reach the '{source}' source, so its symbols were "
+            f"skipped.\n  {reason}\n  Check your internet connection, VPN, or proxy and try "
+            "again later; the provider may also be rate limiting you. Stored data is untouched."
+        )
     if report.failed:
-        raise _fail("one or more symbols failed or were incomplete")
+        raise _fail("one or more symbols failed, were incomplete, or were skipped")
 
 
 @app.command()

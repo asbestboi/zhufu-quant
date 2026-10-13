@@ -45,6 +45,14 @@ class DataSource(ABC):
         per share as actually paid, i.e. not split-adjusted). May be empty.
         """
 
+    def probe(self) -> None:
+        """Make one cheap request to check the provider is reachable; raise if it is not.
+
+        Used before an ingest run and by the circuit breaker. It must not retry, so a
+        dead provider is noticed in seconds. The default does nothing.
+        """
+        return None
+
 
 def with_retries[T](
     call: Callable[[], T],

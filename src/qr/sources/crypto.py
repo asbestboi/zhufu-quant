@@ -76,6 +76,15 @@ class CryptoSource(DataSource):
             what=f"{self._exchange} candles {symbol}",
         )
 
+    def probe(self) -> None:
+        """Ask the exchange for its market list, once, without retries."""
+        try:
+            self._get_client().load_markets()
+        except SourceError:
+            raise
+        except Exception as exc:
+            raise SourceError(f"{self._exchange} did not answer a test request: {exc}") from exc
+
     def fetch_daily(self, symbol: str, start: date, end: date) -> pd.DataFrame:
         """Daily candles for ``[start, end]``, following pagination until ``end`` is reached.
 

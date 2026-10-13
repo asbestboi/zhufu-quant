@@ -328,3 +328,87 @@ def test_symbol_removed_from_config_is_kept_but_inactive(
         ("BBB", False),
     ]
     assert query(data_dir, "SELECT count(*) FROM daily_bars WHERE symbol = 'BBB'") == [(10,)]
+
+
+# ------------------------------------------------------------------ a source that is down
+
+SIX = ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF")
+
+
+def log_statuses(data_dir: Path) -> list[tuple[object, ...]]:
+    return query(data_dir, "SELECT symbol, status FROM ingestion_log ORDER BY symbol")
+
+
+def test_unreachable_source_is_noticed_before_any_download(
+    make_config: MakeConfig, data_dir: Path, clean_bars: pd.DataFrame
+) -> None:
+    source = FakeSource({s: clean_bars for s in SIX})
+    source.dies_after = 0
+    report = ingest(make_config(*SIX), data_dir, source)
+
+    assert source.probes == 1 and source.calls == []
+    assert [r.status for r in report.results] == ["skipped"] * 6
+    assert "source 'yahoo' is down" in report.results[0].message
+    assert report.sources_down == {"yahoo": "connection refused"}
+    assert report.failed
+    assert log_statuses(data_dir) == [(s, "skipped") for s in SIX]
+
+
+def test_run_stops_after_n_consecutive_failures_when_the_source_dies(
+    make_config: MakeConfig, data_dir: Path, clean_bars: pd.DataFrame
+) -> None:
+    source = FakeSource({s: clean_bars for s in SIX})
+    source.dies_after = 1  # AAA downloads, then the provider goes away
+    report = ingest(make_config(*SIX), data_dir, source)
+
+    assert [(r.symbol, r.status) for r in report.results] == [
+        ("AAA", "ok"),
+        ("BBB", "failed"),
+        ("CCC", "failed"),
+        ("DDD", "failed"),
+        ("EEE", "skipped"),
+        ("FFF", "skipped"),
+    ]
+    assert [c[0] for c in source.calls] == ["AAA", "BBB", "CCC", "DDD"]  # nothing after the trip
+    assert source.probes == 2  # once up front, once to confirm the outage
+    assert report.sources_down == {"yahoo": "3 symbols in a row failed, then: connection refused"}
+    assert report.failed
+    assert log_statuses(data_dir)[4:] == [("EEE", "skipped"), ("FFF", "skipped")]
+    assert query(data_dir, "SELECT count(*) FROM daily_bars") == [(10,)]  # AAA is kept
+
+
+def test_threshold_is_configurable(
+    make_config: MakeConfig, data_dir: Path, clean_bars: pd.DataFrame
+) -> None:
+    source = FakeSource({s: clean_bars for s in SIX})
+    source.dies_after = 1
+    config = make_config(*SIX, ingest={"max_consecutive_failures": 1})
+    report = ingest(config, data_dir, source)
+    assert [r.status for r in report.results] == ["ok", "failed", *["skipped"] * 4]
+
+
+def test_bad_tickers_in_a_row_do_not_trip_the_breaker_while_the_source_answers(
+    make_config: MakeConfig, data_dir: Path, clean_bars: pd.DataFrame
+) -> None:
+    source = FakeSource({"AAA": clean_bars, "FFF": clean_bars})  # four unknown tickers between
+    report = ingest(make_config(*SIX), data_dir, source)
+
+    assert [r.status for r in report.results] == ["ok", *["failed"] * 4, "ok"]
+    assert report.sources_down == {}
+    assert source.probes == 2  # up front, and once after the third failure in a row
+
+
+def test_a_success_resets_the_failure_count(
+    make_config: MakeConfig, data_dir: Path, clean_bars: pd.DataFrame
+) -> None:
+    source = FakeSource({"CCC": clean_bars, "FFF": clean_bars})
+    report = ingest(make_config(*SIX), data_dir, source)
+    assert [r.status for r in report.results] == [
+        "failed",
+        "failed",
+        "ok",
+        "failed",
+        "failed",
+        "ok",
+    ]
+    assert source.probes == 1  # never three in a row, so no second probe

@@ -54,8 +54,22 @@ class FakeSource(DataSource):
         self.bars = bars or {}
         self.actions = actions or {}
         self.calls: list[tuple[str, date, date]] = []
+        self.probes = 0
+        self.dies_after: int | None = None  # unreachable once this many fetches were made
+
+    @property
+    def dead(self) -> bool:
+        return self.dies_after is not None and len(self.calls) >= self.dies_after
+
+    def probe(self) -> None:
+        self.probes += 1
+        if self.dead:
+            raise SourceError("connection refused")
 
     def fetch_daily(self, symbol: str, start: date, end: date) -> pd.DataFrame:
+        if self.dead:
+            self.calls.append((symbol, start, end))
+            raise SourceError("connection refused")
         self.calls.append((symbol, start, end))
         if symbol not in self.bars:
             raise SourceError(f"no data for {symbol}")
