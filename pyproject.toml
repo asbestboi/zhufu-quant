@@ -1,12 +1,13 @@
 [project]
 name = "qr"
 version = "0.1.0"
-description = "Personal quant research: market data pipeline (step 1 of the roadmap)"
+description = "Personal quant research: market data pipeline and backtesting engines"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12"
 dependencies = [
     "duckdb>=1.1",
+    "matplotlib>=3.9",
     "pandas>=2.2",
     "pandas-market-calendars>=4.4",
     "pyarrow>=17",
@@ -26,7 +27,6 @@ qr = "qr.cli:app"
 [dependency-groups]
 dev = [
     "ipykernel>=6.29",
-    "matplotlib>=3.9",
     "mypy>=1.11",
     "nbconvert>=7.16",
     "pandas-stubs>=2.2",
