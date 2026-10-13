@@ -19,6 +19,15 @@ class SourceError(Exception):
     """A provider failed, or returned nothing usable, after all retries."""
 
 
+class PermanentSourceError(SourceError):
+    """A failure that retrying cannot fix: a rejected API key, an unknown ticker."""
+
+
+class SourceUnavailableError(PermanentSourceError):
+    """The whole provider is unusable for now (rejected key, used-up allowance), so there
+    is no point asking it about further symbols."""
+
+
 class DataSource(ABC):
     """A provider of daily bars and corporate actions.
 
@@ -66,12 +75,15 @@ def with_retries[T](
 
     ``max_retries`` is the number of retries after the first attempt, and the wait before
     retry ``k`` (1-based) is ``backoff_seconds * 2**(k-1)``, capped at one minute.
+    A :class:`PermanentSourceError` is passed straight through without retrying.
     """
     attempts = max_retries + 1
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
             return call()
+        except PermanentSourceError:
+            raise
         except Exception as exc:
             last_error = exc
             if attempt == attempts:

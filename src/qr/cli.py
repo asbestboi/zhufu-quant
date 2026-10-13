@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -11,11 +12,13 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from qr import crosscheck as crosscheck_module
 from qr import storage
 from qr.adjust import Adjustment
 from qr.config import ConfigError, UniverseConfig, db_path, load_config, load_env_file
 from qr.ingest import FAILED, PARTIAL, run_ingest
 from qr.load import get_bars
+from qr.sources.base import SourceError
 from qr.storage import StorageError
 from qr.validate import summarize, validate_symbols
 
@@ -211,6 +214,67 @@ def status(
             str(int(row["warnings"])),
         )
     console.print(table)
+
+
+@app.command()
+def crosscheck(
+    symbols: SymbolsOption = None,
+    universe: UniverseOption = None,
+    days: Annotated[int, typer.Option("--days", min=1, help="Calendar days to compare.")] = 365,
+    config: ConfigOption = None,
+    data_dir: DataDirOption = None,
+) -> None:
+    """Compare stored closes and splits with a second source (Tiingo)."""
+    cfg = _config(config)
+    selected = _selection(cfg, symbols, universe)
+    api_key = os.environ.get("TIINGO_API_KEY", "").strip()
+    if not api_key:
+        console.print(
+            "Cross-checking needs a Tiingo API key, and TIINGO_API_KEY is not set.\n"
+            "  1. Create a free account at https://www.tiingo.com\n"
+            "  2. Copy your token from https://www.tiingo.com/account/api/token\n"
+            "  3. Put TIINGO_API_KEY=<your token> in a file called .env in this folder\n"
+            "     (see .env.example), then run `qr crosscheck` again.\n"
+            "Nothing was checked."
+        )
+        return
+    try:
+        report = crosscheck_module.run_crosscheck(cfg, data_dir, selected, days, api_key=api_key)
+    except SourceError as exc:
+        raise _fail(f"could not use the comparison source: {exc}") from exc
+
+    table = Table(title=f"Cross-check against {report.source}, {report.start} to {report.end}")
+    table.add_column("symbol")
+    table.add_column("status")
+    for column in ("days compared", "mismatches", "worst difference"):
+        table.add_column(column, justify="right")
+    table.add_column("note")
+    colours = {"ok": "green", "mismatch": "yellow", "failed": "red", "skipped": "dim"}
+    for result in report.results:
+        colour = colours[result.status]
+        worst = (
+            f"{result.worst_difference:.3%} on {result.worst_date}" if result.days_compared else "-"
+        )
+        note = result.message
+        if result.unmatched_days:
+            note = f"{result.unmatched_days} days in only one source"
+        table.add_row(
+            result.symbol,
+            f"[{colour}]{result.status}[/{colour}]",
+            str(result.days_compared),
+            str(result.mismatches),
+            worst,
+            note,
+        )
+    console.print(table)
+    total = sum(r.mismatches for r in report.results)
+    if total:
+        console.print(
+            f"{total} mismatches recorded as `crosscheck` warnings; see `qr validate`. "
+            "A mismatch means the sources disagree, not which one is right."
+        )
+    if report.failed:
+        raise _fail("one or more symbols could not be cross-checked")
 
 
 @app.command()

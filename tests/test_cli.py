@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
+from qr import crosscheck as crosscheck_module
 from qr import ingest as ingest_module
 from qr import storage
 from qr.cli import app
@@ -42,6 +43,8 @@ def project(
     monkeypatch.setenv("QR_CONFIG", str(config))
     monkeypatch.setenv("QR_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.delenv("TIINGO_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)  # so a developer's own .env is never picked up
     monkeypatch.setattr(storage, "utcnow", lambda: AFTER_JAN_16)
     source = FakeSource({"AAA": clean_bars, "BBB": clean_bars})
     monkeypatch.setattr(ingest_module, "build_source", lambda name, cfg: source)
@@ -170,3 +173,53 @@ def test_ingest_fails_fast_when_the_source_is_unreachable(project: FakeSource) -
     assert "connection refused" in result.output
     assert "skipped" in result.output
     assert project.calls == []
+
+
+def test_crosscheck_without_a_key_explains_itself(project: FakeSource) -> None:
+    runner.invoke(app, ["ingest"])
+    result = runner.invoke(app, ["crosscheck"])
+    assert result.exit_code == 0, result.output
+    assert "TIINGO_API_KEY is not set" in result.output
+    assert "https://www.tiingo.com" in result.output
+    assert "Nothing was checked" in result.output
+
+
+def test_crosscheck_reads_the_key_from_dot_env_and_reports_mismatches(
+    project: FakeSource, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_bars: pd.DataFrame
+) -> None:
+    runner.invoke(app, ["ingest"])
+    off = clean_bars.copy()
+    off.loc[off["date"] == "2024-01-09", "close"] *= 1.02
+    other = FakeSource({"AAA": clean_bars, "BBB": off}, name="tiingo")
+    keys: list[str] = []
+
+    def build(config: object, api_key: str) -> FakeSource:
+        keys.append(api_key)
+        return other
+
+    monkeypatch.setattr(crosscheck_module, "build_source", build)
+    monkeypatch.setenv("TIINGO_API_KEY", "")  # registered so the .env value is undone later
+    monkeypatch.delenv("TIINGO_API_KEY")
+    (tmp_path / ".env").write_text("TIINGO_API_KEY=from-dot-env\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["crosscheck", "--days", "30"])
+    assert result.exit_code == 0, result.output
+    assert keys == ["from-dot-env"]
+    assert "Cross-check against tiingo" in result.output
+    assert "mismatch" in result.output and "2.000% on 2024-01-09" in result.output
+    assert "1 mismatches recorded" in result.output
+
+    validate = runner.invoke(app, ["validate"])
+    assert validate.exit_code == 0  # a warning, not an error
+    assert "crosscheck" in validate.output
+
+    only = runner.invoke(app, ["crosscheck", "--universe", "first"])
+    assert only.exit_code == 0 and "BBB" not in only.output
+
+    del other.bars["AAA"]
+    assert runner.invoke(app, ["crosscheck", "--symbols", "AAA"]).exit_code == 1
+
+    other.dies_after = 0
+    down = runner.invoke(app, ["crosscheck"])
+    assert down.exit_code == 1
+    assert "could not use the comparison source: connection refused" in down.output
