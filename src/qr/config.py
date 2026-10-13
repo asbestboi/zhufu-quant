@@ -48,6 +48,17 @@ class ValidationSettings(_Model):
     revision_tolerance: float = Field(default=1e-4, ge=0)
 
 
+class IngestSettings(_Model):
+    # A source is declared down after this many symbols in a row fail to download.
+    max_consecutive_failures: int = Field(default=3, ge=1)
+
+
+class CrosscheckSettings(_Model):
+    close_tolerance: float = Field(default=0.005, gt=0)  # relative difference on the close
+    request_delay_seconds: float = Field(default=0.5, ge=0)
+    max_retries: int = Field(default=2, ge=0)
+
+
 class Instrument(_Model):
     symbol: str = Field(min_length=1)
     source: SourceName
@@ -68,7 +79,10 @@ class UniverseConfig(_Model):
     timezone: str = "UTC"
     sources: SourcesConfig = SourcesConfig()
     validation: ValidationSettings = ValidationSettings()
+    ingest: IngestSettings = IngestSettings()
+    crosscheck: CrosscheckSettings = CrosscheckSettings()
     universe: list[Instrument] = Field(min_length=1)
+    groups: dict[str, list[str]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check(self) -> UniverseConfig:
@@ -78,6 +92,16 @@ class UniverseConfig(_Model):
             raise ValueError(f"duplicate symbols in universe: {', '.join(duplicates)}")
         if self.start_date > date.today():
             raise ValueError(f"start_date {self.start_date} is in the future")
+        for name, members in self.groups.items():
+            undefined = [s for s in members if s not in symbols]
+            if undefined:
+                raise ValueError(
+                    f"group '{name}' lists symbols that are not defined in universe: "
+                    f"{', '.join(undefined)}"
+                )
+            repeated = sorted({s for s in members if members.count(s) > 1})
+            if repeated:
+                raise ValueError(f"group '{name}' repeats symbols: {', '.join(repeated)}")
         return self
 
     def source_enabled(self, source: str) -> bool:
@@ -87,6 +111,13 @@ class UniverseConfig(_Model):
     def instrument(self, symbol: str) -> Instrument | None:
         """Return the configured instrument for ``symbol``, if any."""
         return next((i for i in self.universe if i.symbol == symbol), None)
+
+    def group(self, name: str) -> list[str]:
+        """Symbols of the named group, in the order the config lists them."""
+        if name not in self.groups:
+            known = ", ".join(sorted(self.groups)) or "none defined"
+            raise ConfigError(f"unknown universe '{name}' (available: {known})")
+        return list(self.groups[name])
 
 
 def config_path(path: Path | str | None = None) -> Path:
@@ -128,3 +159,30 @@ def load_config(path: Path | str | None = None) -> UniverseConfig:
             for err in exc.errors()
         )
         raise ConfigError(f"{resolved}: invalid config\n{problems}") from exc
+
+
+def universe_symbols(name: str, path: Path | str | None = None) -> list[str]:
+    """Symbols of the named universe (a ``groups:`` entry in the config file)."""
+    return load_config(path).group(name)
+
+
+def load_env_file(path: Path | str = ".env") -> None:
+    """Copy ``KEY=VALUE`` lines from a ``.env`` file into the process environment.
+
+    Variables that are already set win, so the real environment overrides the file.
+    Blank lines and ``#`` comments are ignored; a missing file is fine.
+    """
+    env_file = Path(path)
+    if not env_file.is_file():
+        return
+    for line in env_file.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip().removeprefix("export ").strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)

@@ -13,7 +13,7 @@ from rich.table import Table
 
 from qr import storage
 from qr.adjust import Adjustment
-from qr.config import ConfigError, UniverseConfig, db_path, load_config
+from qr.config import ConfigError, UniverseConfig, db_path, load_config, load_env_file
 from qr.ingest import FAILED, PARTIAL, run_ingest
 from qr.load import get_bars
 from qr.storage import StorageError
@@ -31,13 +31,17 @@ DataDirOption = Annotated[
 SymbolsOption = Annotated[
     str | None, typer.Option("--symbols", help="Comma-separated symbols (default: all).")
 ]
+UniverseOption = Annotated[
+    str | None, typer.Option("--universe", help="A named group from the config's `groups:`.")
+]
 
 
 @app.callback()
 def main(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show debug logs.")] = False,
 ) -> None:
-    """Set up logging for every command."""
+    """Set up logging and read ``.env`` for every command."""
+    load_env_file()
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
@@ -64,6 +68,18 @@ def _symbols(value: str | None) -> list[str] | None:
     if value is None:
         return None
     return [s.strip() for s in value.split(",") if s.strip()]
+
+
+def _selection(cfg: UniverseConfig, symbols: str | None, universe: str | None) -> list[str] | None:
+    """The symbols a command should act on; None means everything."""
+    if symbols is not None and universe is not None:
+        raise _fail("use either --symbols or --universe, not both")
+    if universe is not None:
+        try:
+            return cfg.group(universe)
+        except ConfigError as exc:
+            raise _fail(str(exc)) from exc
+    return _symbols(symbols)
 
 
 def _date(value: Any) -> str:
@@ -104,11 +120,14 @@ def init(data_dir: DataDirOption = None) -> None:
 
 @app.command()
 def ingest(
-    symbols: SymbolsOption = None, config: ConfigOption = None, data_dir: DataDirOption = None
+    symbols: SymbolsOption = None,
+    universe: UniverseOption = None,
+    config: ConfigOption = None,
+    data_dir: DataDirOption = None,
 ) -> None:
     """Incrementally download bars and corporate actions, then run quality checks."""
     cfg = _config(config)
-    report = run_ingest(cfg, data_dir, _symbols(symbols))
+    report = run_ingest(cfg, data_dir, _selection(cfg, symbols, universe))
 
     table = Table(title=f"Ingest run {report.run_id}")
     for column in ("symbol", "status", "rows written", "message"):
@@ -131,11 +150,14 @@ def ingest(
 
 @app.command()
 def validate(
-    symbols: SymbolsOption = None, config: ConfigOption = None, data_dir: DataDirOption = None
+    symbols: SymbolsOption = None,
+    universe: UniverseOption = None,
+    config: ConfigOption = None,
+    data_dir: DataDirOption = None,
 ) -> None:
     """Run quality checks on stored data and print a summary of all open findings."""
     cfg = _config(config)
-    selected = _symbols(symbols)
+    selected = _selection(cfg, symbols, universe)
     try:
         with storage.connect(db_path(data_dir)) as con:
             storage.init_schema(con)
@@ -149,13 +171,19 @@ def validate(
 
 
 @app.command()
-def status(data_dir: DataDirOption = None) -> None:
+def status(
+    universe: UniverseOption = None, config: ConfigOption = None, data_dir: DataDirOption = None
+) -> None:
     """Show per-symbol coverage: first/last date, row count, and open issues."""
+    # The config is only needed to look up a named universe.
+    members = _selection(_config(config), None, universe) if universe is not None else None
     try:
         with storage.connect(db_path(data_dir), read_only=True) as con:
             coverage = storage.read_coverage(con)
     except StorageError as exc:
         raise _fail(str(exc)) from exc
+    if members is not None:
+        coverage = coverage[coverage["symbol"].isin(members)]
     if coverage.empty:
         console.print("No instruments yet. Run `qr ingest`.")
         return

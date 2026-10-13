@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import os
 from datetime import date
 from pathlib import Path
 
 import pytest
 
-from qr.config import ConfigError, load_config
+from qr.config import ConfigError, load_config, load_env_file, universe_symbols
 
 REPO_CONFIG = Path(__file__).parents[1] / "config" / "universe.yaml"
 
@@ -64,3 +65,52 @@ def test_missing_file(tmp_path: Path) -> None:
 def test_invalid_config_fails_with_clear_error(tmp_path: Path, text: str, expected: str) -> None:
     with pytest.raises(ConfigError, match=expected):
         load_config(write(tmp_path, text))
+
+
+GROUPS = VALID + "groups:\n  macro: [SPY]\n  all: [BTC/USD, SPY]\n"
+
+
+def test_groups(tmp_path: Path) -> None:
+    path = write(tmp_path, GROUPS)
+    config = load_config(path)
+    assert config.group("all") == ["BTC/USD", "SPY"]  # config order is kept
+    assert universe_symbols("macro", path) == ["SPY"]
+    with pytest.raises(ConfigError, match=r"unknown universe 'nope' \(available: all, macro\)"):
+        config.group("nope")
+    assert load_config(write(tmp_path, VALID)).groups == {}
+
+
+def test_default_config_groups() -> None:
+    assert universe_symbols("core", REPO_CONFIG)[0] == "SPY"
+    pairs = ["KO", "PEP", "XOM", "CVX", "V", "MA", "HD", "LOW", "GS", "MS"]
+    assert universe_symbols("pairs", REPO_CONFIG) == pairs
+
+
+@pytest.mark.parametrize(
+    ("groups", "expected"),
+    [
+        ("groups: { pairs: [SPY, KO, PEP] }", "group 'pairs' lists symbols.*universe: KO, PEP"),
+        ("groups: { pairs: [SPY, SPY] }", "group 'pairs' repeats symbols: SPY"),
+        ("groups: [SPY]", "groups"),
+    ],
+)
+def test_invalid_groups_fail_with_clear_error(tmp_path: Path, groups: str, expected: str) -> None:
+    with pytest.raises(ConfigError, match=expected):
+        load_config(write(tmp_path, VALID + groups + "\n"))
+
+
+def test_load_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env = tmp_path / ".env"
+    lines = ["# comment", "", "QR_TEST_A=one", "export QR_TEST_B = 'two words'", "QR_TEST_C=file"]
+    env.write_text("\n".join([*lines, "nonsense"]), encoding="utf-8")
+    monkeypatch.setenv("QR_TEST_A", "placeholder")  # so monkeypatch restores all three
+    monkeypatch.setenv("QR_TEST_B", "placeholder")
+    monkeypatch.delenv("QR_TEST_A")
+    monkeypatch.delenv("QR_TEST_B")
+    monkeypatch.setenv("QR_TEST_C", "environment")
+
+    load_env_file(env)
+    assert os.environ["QR_TEST_A"] == "one"
+    assert os.environ["QR_TEST_B"] == "two words"
+    assert os.environ["QR_TEST_C"] == "environment"  # the real environment wins
+    load_env_file(tmp_path / "absent.env")  # a missing file is fine
