@@ -1,0 +1,36 @@
+# Checks that run on `git commit`. Set up once with `uv run pre-commit install`.
+# The specs in docs/ are hand-off documents and are left exactly as received.
+exclude: ^docs/specs/
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.0
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: no-env-files
+        name: no .env files (secrets stay local)
+        entry: Do not commit .env files; put placeholders in .env.example instead.
+        language: fail
+        files: (^|/)\.env(\.|$)
+        exclude: (^|/)\.env\.example$
+      - id: no-databases
+        name: no DuckDB files (market data stays local)
+        entry: Do not commit database files; data/ is local only.
+        language: fail
+        files: \.duckdb(\.wal)?$
