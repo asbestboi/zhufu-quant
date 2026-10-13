@@ -23,6 +23,8 @@ sources: { yahoo: { request_delay_seconds: 0, max_retries: 0 } }
 universe:
   - { symbol: AAA, source: yahoo, asset_class: equity }
   - { symbol: BBB, source: yahoo, asset_class: equity }
+groups:
+  first: [AAA]
 """
 
 
@@ -131,3 +133,30 @@ def test_bad_config_fails_fast(project: FakeSource, tmp_path: Path) -> None:
     result = runner.invoke(app, ["ingest", "--config", str(broken)])
     assert result.exit_code == 1
     assert "invalid config" in result.output
+
+
+def test_named_universe(project: FakeSource) -> None:
+    result = runner.invoke(app, ["ingest", "--universe", "first"])
+    assert result.exit_code == 0, result.output
+    assert [call[0] for call in project.calls] == ["AAA"]
+
+    runner.invoke(app, ["ingest"])
+    status = runner.invoke(app, ["status", "--universe", "first"])
+    assert status.exit_code == 0, status.output
+    assert "AAA" in status.output and "BBB" not in status.output
+    assert runner.invoke(app, ["validate", "--universe", "first"]).exit_code == 0
+
+    both = runner.invoke(app, ["ingest", "--universe", "first", "--symbols", "AAA"])
+    assert both.exit_code == 1 and "not both" in both.output
+    for command in ("ingest", "validate", "status"):
+        unknown = runner.invoke(app, [command, "--universe", "nope"])
+        assert unknown.exit_code == 1, command
+        assert "unknown universe 'nope' (available: first)" in unknown.output
+
+
+def test_invalid_group_config_fails_with_clear_error(project: FakeSource, tmp_path: Path) -> None:
+    broken = tmp_path / "broken.yaml"
+    broken.write_text(CONFIG.replace("first: [AAA]", "first: [AAA, ZZZ]"), encoding="utf-8")
+    result = runner.invoke(app, ["ingest", "--config", str(broken), "--universe", "first"])
+    assert result.exit_code == 1
+    assert "group 'first' lists symbols that are not defined in universe: ZZZ" in result.output

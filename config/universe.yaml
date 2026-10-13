@@ -9,6 +9,17 @@ sources:
     enabled: false
     exchange: kraken
 
+# A source is declared down, and its remaining symbols skipped, after this many symbols
+# in a row fail to download and a connectivity probe fails as well.
+ingest:
+  max_consecutive_failures: 3
+
+# `qr crosscheck` compares stored closes with Tiingo (needs TIINGO_API_KEY in .env)
+crosscheck:
+  close_tolerance: 0.005           # flag closes that differ by more than 0.5%
+  request_delay_seconds: 0.5
+  max_retries: 2
+
 # Thresholds for the quality checks (all optional; these are the defaults)
 validation:
   outlier_return_threshold: 0.25   # flag |daily return| above this unless a split explains it
@@ -24,5 +35,21 @@ universe:
   - { symbol: GLD,  source: yahoo, asset_class: etf }
   - { symbol: AAPL, source: yahoo, asset_class: equity }
   - { symbol: MSFT, source: yahoo, asset_class: equity }
+  # Candidates for the pairs-trading study
+  - { symbol: KO,   source: yahoo, asset_class: equity }
+  - { symbol: PEP,  source: yahoo, asset_class: equity }
+  - { symbol: XOM,  source: yahoo, asset_class: equity }
+  - { symbol: CVX,  source: yahoo, asset_class: equity }
+  - { symbol: V,    source: yahoo, asset_class: equity }
+  - { symbol: MA,   source: yahoo, asset_class: equity }
+  - { symbol: HD,   source: yahoo, asset_class: equity }
+  - { symbol: LOW,  source: yahoo, asset_class: equity }
+  - { symbol: GS,   source: yahoo, asset_class: equity }
+  - { symbol: MS,   source: yahoo, asset_class: equity }
   # Skipped while sources.crypto.enabled is false
   - { symbol: BTC/USD, source: crypto, asset_class: crypto }
+
+# Named universes, e.g. `qr ingest --universe pairs`. Every symbol must be defined above.
+groups:
+  core:  [SPY, QQQ, IWM, TLT, GLD, AAPL, MSFT]
+  pairs: [KO, PEP, XOM, CVX, V, MA, HD, LOW, GS, MS]
