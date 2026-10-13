@@ -7,14 +7,21 @@
 ## What this is
 
 A personal quantitative research toolkit, built step by step as a learning project. The
-Python package is called `qr`. So far it is a **market data pipeline**: it downloads daily
-OHLCV bars plus splits and dividends for a configurable list of stocks and ETFs, checks
-them for errors, stores them locally in DuckDB (with an immutable Parquet snapshot of
-every download), and offers a small Python API and CLI for loading them, adjusted or not.
-Later steps (backtesting, strategy research, paper trading) will import it as a library.
+Python package is called `qr`. So far it has two parts:
 
-Priorities, in order: correctness, reproducibility, avoiding data biases. Speed and
-features come after.
+- A **market data pipeline**: it downloads daily OHLCV bars plus splits and dividends for
+  a configurable list of stocks and ETFs, checks them for errors, stores them locally in
+  DuckDB (with an immutable Parquet snapshot of every download), and offers a small
+  Python API and CLI for loading them, adjusted or not.
+- A **backtester** with two engines on top of that data: a fast vectorized one for
+  screening ideas and a realistic event-driven one for validating them, with shared
+  costs, metrics, HTML reports, and a log of every experiment. See
+  [Backtesting](#backtesting).
+
+Later steps (strategy research, paper trading) will build on both.
+
+Priorities, in order: correctness, no look-ahead bias, realistic costs, reproducibility.
+Speed and features come after.
 
 > **Disclaimer.** This project is for research and education only. Nothing in it is
 > financial advice, and it comes with no warranty of any kind (see [LICENSE](LICENSE)).
@@ -27,7 +34,7 @@ features come after.
 | --- | --- | --- |
 | 1 | Market data pipeline: ingest, validate, store, load | Done |
 | 1.1 | Pipeline polish: CI, fail-fast ingestion, cross-checking, named universes | Done |
-| 2 | Backtesting engine (vectorized and event-driven) | Planned |
+| 2 | Backtesting engine (vectorized and event-driven) | Done |
 | 3 | Strategy research, starting with a pairs-trading study | Planned |
 | 4 | Paper trading, then possibly live trading | Planned |
 
@@ -60,6 +67,9 @@ in (real environment variables win); see `.env.example`.
 | `qr status [--universe NAME]` | Per-symbol coverage: first/last date, row count, open errors and warnings. |
 | `qr crosscheck [--symbols X,Y \| --universe NAME] [--days 365]` | Compare stored closes and splits with a second source (Tiingo). See [Cross-checking](#cross-checking-against-a-second-source). |
 | `qr export SYMBOL --out f.csv [--adjustment none\|split\|total_return]` | Dump bars to CSV (total-return adjusted by default). |
+| `qr backtest run CONFIG.yaml [--notes TEXT] [--reports-dir DIR]` | Run a backtest, write its HTML tearsheet, log it to the registry. Exits non-zero (and logs the run as failed) if it could not run. |
+| `qr backtest list [--strategy NAME] [--limit 20]` | Recent runs from the registry. |
+| `qr backtest compare RUN_ID RUN_ID ...` | Side-by-side metrics of logged runs; unique id prefixes are enough. |
 
 Add `-v` before the command for debug logs: `qr -v ingest`. `--universe` takes the name
 of a group from the config's `groups:` section; using it together with `--symbols` is an
@@ -122,7 +132,10 @@ change the time. Pick a time after the US close (16:00 New York): 23:30 suits Eu
 
 ## Loading data in Python
 
-`qr.load` is the only module later steps should import.
+`qr.load` is the only module later steps should import (the backtester reads all its
+data through it). Besides the functions below it has `get_corporate_actions(symbols,
+end=None)` (splits and dividends as a table), `get_asset_classes(symbols)`, and
+`data_version(symbols, end=None)` (when the newest of those bars was last written).
 
 ```python
 from datetime import date, datetime
@@ -272,6 +285,230 @@ Things to know:
 - The free tier allows roughly 50 requests an hour and 1,000 a day; one symbol is one
   request. A rejected key or an exhausted allowance stops the run at once.
 
+## Backtesting
+
+Two engines share one data layer, one cost model, one account format, and one metrics
+module (`qr/backtest/`):
+
+| | Vectorized engine | Event-driven engine |
+| --- | --- | --- |
+| Purpose | Screen many ideas quickly | Validate the promising ones realistically |
+| A strategy is | A table of target weights per day | Code that reacts to each bar and sends orders |
+| Prices | Total-return adjusted | As traded, with splits and cash dividends applied to the account |
+| Positions | Dollars (fractional shares) | Shares (whole by default), with cost basis and realized P&L |
+| Orders | Implied by the weights | Market, limit, market-on-close |
+| Speed | 10 years of 50 symbols in under a second | Seconds for a few symbols; a daily rebalance of 50 takes much longer |
+
+Because they are independent implementations, they check each other: on the reference
+strategies their equity curves agree to within the effect of rounding to whole shares
+(tested in `tests/test_bt_parity_lookahead.py`). If you write a strategy for both and
+they disagree, one of them has a bug.
+
+```
+uv run qr backtest run configs/backtests/sma_spy.yaml         # run, write report, log
+uv run qr backtest run configs/backtests/sma_spy_event.yaml   # the same idea, event engine
+uv run qr backtest list                                       # recent runs
+uv run qr backtest compare 20261013T2134 20261013T2135        # side by side (id prefixes)
+```
+
+`run` prints the metrics after costs, before costs, and for the benchmark, writes a
+tearsheet to `reports/` (gitignored), and adds a row to the registry.
+
+### No look-ahead, enforced in code
+
+- **A decision made on the close of day t trades on day t+1**, at the open
+  (`execution: next_open`, the default) or the close (`next_close`), never on day t. The
+  vectorized engine applies the one-bar delay itself; the event engine only matches
+  orders submitted on earlier sessions.
+- **Orders are sized with what was known at the decision.** A target weight becomes a
+  share count using the equity and closes of day t. The fill happens at a different
+  price, so the weight actually reached differs slightly from the target, exactly as it
+  would in real trading.
+- **Strategies only see the past.** An event strategy gets one day of bars and a
+  `ctx.history()` that stops at the current bar. A weight strategy is given the whole
+  table once, so the engine verifies it: it reruns the strategy on data cut off at a few
+  dates (`lookahead_checks`, default 3) and raises `LookAheadError` if the weights for
+  those dates change.
+- **Rolling helpers are past-only**: `sma`, `past_return`, `rolling_volatility`, and
+  `zscore` in `qr.backtest.strategy` need a full window and never center it.
+- **No symbol is traded before its first bar**, whatever weight a strategy gives it.
+
+### Writing a strategy for the vectorized engine
+
+Return a (date x symbol) table of weights. The row for a date is the decision made on
+that date's close.
+
+```python
+import pandas as pd
+from qr.backtest.strategies import register
+from qr.backtest.strategy import WeightStrategy, closes, sma
+
+
+class AboveAverage(WeightStrategy):
+    """Hold each symbol while it closes above its moving average."""
+
+    def __init__(self, window: int = 100) -> None:  # config `params` arrive here
+        self.window = window
+
+    def target_weights(self, bars: pd.DataFrame) -> pd.DataFrame:
+        prices = closes(bars)  # bars has the shape get_bars returns
+        return (prices > sma(prices, self.window)) / prices.shape[1]
+
+
+register("above_average", vectorized=AboveAverage)
+```
+
+Weights are fractions of equity: 0.5 is half the account, negative is short, NaN is no
+position. Use ratios of prices, never price levels: adjusted levels shift whenever a later
+dividend is paid, ratios do not.
+
+### Writing a strategy for the event-driven engine
+
+Override the hooks you need. Anything submitted in `on_bar` is executed on the next
+session.
+
+```python
+from qr.backtest.account import Trade
+from qr.backtest.events import Bar
+from qr.backtest.strategy import Context, EventStrategy
+
+
+class AboveAverageEvents(EventStrategy):
+    def __init__(self, window: int = 100) -> None:
+        self.window = window
+
+    def on_bar(self, ctx: Context, bars: dict[str, Bar]) -> None:
+        if not ctx.is_rebalance:  # the config's `rebalance` schedule
+            return
+        for symbol in ctx.symbols:
+            prices = ctx.history(symbol, self.window)  # past only, adjusted
+            if len(prices) < self.window:
+                continue
+            above = prices.iloc[-1] > prices.mean()
+            ctx.order_target_weight(symbol, 1 / len(ctx.symbols) if above else 0.0)
+
+    def on_fill(self, ctx: Context, trade: Trade) -> None: ...  # also on_start, on_end
+```
+
+`Context` offers `now`, `symbols`, `cash`, `equity`, `account` (a full `AccountState`),
+`position(symbol)`, `history(symbol, n, field="close", adjusted=True)`, `is_rebalance`,
+`open_orders()`, and the order methods `order(symbol, quantity)` (signed; a market order,
+or market-on-close under `execution: next_close`), `order_limit(symbol, quantity, price,
+tif="gtc"|"day")`, `order_target_quantity`, `order_target_weight`, and `cancel`.
+
+Register both versions under one name with `register("name", vectorized=..., event=...)`
+before running, or call the engines directly:
+
+```python
+from qr.backtest.config import load_backtest_config
+from qr.backtest.runner import run_backtest
+
+result = run_backtest(load_backtest_config("configs/backtests/sma_spy.yaml"))
+result.equity, result.gross_equity, result.benchmark  # daily curves
+result.metrics["sharpe"], result.net.trades, result.net.accounts
+```
+
+### Backtest config reference
+
+One YAML file per experiment in `configs/backtests/`. Unknown keys are rejected.
+
+```yaml
+name: sma_crossover_spy     # used in the report file name and the registry
+engine: vectorized          # vectorized | event
+strategy: sma_crossover     # buy_and_hold | sma_crossover | xs_momentum | your own
+params: { fast: 50, slow: 200 }
+universe: [SPY]             # a list, or the name of a group in config/universe.yaml
+start: 2012-01-01           # first session traded; earlier bars warm up indicators
+end: 2024-12-31             # nothing after this date is read
+initial_cash: 10000
+benchmark: SPY              # or null
+execution: next_open        # next_open | next_close
+rebalance: daily            # daily | weekly | monthly | [2020-01-02, 2020-07-01]
+whole_shares: true          # event engine; false allows fractions (crypto)
+risk_free_rate: 0.0         # annual, for Sharpe, Sortino, and alpha
+lookahead_checks: 3         # vectorized engine; 0 switches the check off
+notes: ""
+costs:
+  commission_model: ibkr_tiered   # ibkr_tiered | ibkr_fixed | per_share | percent | none
+  commission_per_share: 0.0035    # these four override the preset's numbers
+  commission_min_per_order: 0.35
+  commission_max_pct: 0.01        # cap, as a fraction of trade value
+  commission_pct: 0.0             # fraction of trade value
+  spread_bps: 1                   # half-spread: the cost of one trade
+  slippage_bps: 2
+  impact_bps: 0                   # extra slippage for an order as big as a day's volume
+  impact_exponent: 1.0            # scaled by (order / daily volume) ** exponent
+  borrow_rate: 0.01               # annual, on short market value, per calendar day / 360
+  max_participation: null         # e.g. 0.1: at most 10% of average daily dollar volume
+  participation_action: partial   # partial (cut the order) | reject
+  adv_window: 20                  # sessions in the volume average
+  asset_classes:                  # the same keys, per asset class ...
+    crypto: { commission_model: percent, commission_pct: 0.0026, spread_bps: 5 }
+  symbols:                        # ... and per symbol
+    TLT: { spread_bps: 0.5 }
+constraints:
+  long_only: false
+  max_gross_leverage: 1.0
+  max_weight: null                # per symbol, as a fraction of equity
+  min_trade_weight: 0.0           # skip rebalancing trades below this share of equity
+```
+
+`weekly` and `monthly` decide on the last session of the week or month and trade on the
+first session of the next; the first session of the backtest is always a decision date.
+Presets: `ibkr_tiered` is 0.0035 a share, 0.35 minimum, 1% maximum; `ibkr_fixed` is
+0.005, 1.00, 1%; `per_share` 0.005; `percent` 0.1%.
+
+### Costs
+
+All of them apply in both engines, and every report shows the result **before and after
+costs** (the "before" run is the same strategy with every cost at zero).
+
+- **Commission** `per_share * shares + pct * value`, capped at `max_pct * value`, then
+  raised to the per-order minimum.
+- **Spread and slippage** in basis points of the traded value. The event engine charges
+  them through the fill price (a buy pays more, a sell receives less); a limit order that
+  is filled at its limit pays neither.
+- **Short borrow** accrues daily on the short market value.
+- **Participation cap** against the average dollar volume of the previous `adv_window`
+  sessions.
+
+### The account format
+
+`qr.backtest.account.AccountState` is one serializable snapshot (timestamp, cash,
+positions, open orders, equity, exposures, realized and unrealized P&L, fees) used by
+both engines and meant for paper and live trading later. `state.to_json()` and
+`AccountState.from_json()` round-trip exactly. Every fill produces an immutable `Trade`.
+The vectorized engine has no shares or cost basis, so it produces the same daily table
+with the P&L columns empty; `result.net.snapshot(date)` gives any day as an
+`AccountState`.
+
+### Metrics and the tearsheet
+
+Total return, CAGR, annualized volatility, Sharpe, Sortino, Calmar, maximum drawdown,
+longest drawdown, time underwater, annualized turnover, average holding period, gross and
+net exposure, beta, correlation and alpha against the benchmark, rolling one-year Sharpe
+and volatility, and the **Probabilistic Sharpe Ratio**. The event engine adds hit rate,
+average win and loss, and profit factor from realized P&L.
+
+The PSR is the probability that the true Sharpe ratio is above zero given this one
+sample's length, skew, and fat tails. It does **not** account for multiple testing: try
+enough ideas and one will look good by luck. Step 3 will add the Deflated Sharpe Ratio,
+which needs the registry below.
+
+Each run writes one self-contained HTML file (charts are inline SVG; nothing is loaded
+from the network): equity against the benchmark on a log scale, drawdowns, a monthly
+returns heatmap, rolling Sharpe and volatility, exposure, the before/after cost
+comparison, the metrics table, the config, and the run's metadata.
+
+### The experiment registry
+
+Every `qr backtest run` is logged to `data/backtests.duckdb`: run id, time, strategy,
+engine, the full config and its hash, git commit and whether the tree was dirty, the
+version of the data read, the period, Sharpe, CAGR, maximum drawdown, turnover, the
+report path, and notes. **Failed runs are logged too**, with status `failed` and the
+error as notes. Do not delete rows for ideas that did not work: the number of things
+tried is exactly what an honest significance test needs.
+
 ## How it works
 
 ```
@@ -364,6 +601,33 @@ Read this before trusting any backtest built on this data.
   asked for, so history there begins about two years back. Use another exchange (e.g.
   `binance`) for a longer history. Crypto "closes" are simply 00:00 UTC.
 
+### Limitations of the backtester
+
+- **Daily bars are all it knows.** A market order fills at the official open or close
+  plus the modelled costs. There is no queue, no intraday path, and no auction imbalance.
+  A limit order either traded through or did not, judged from the day's high and low.
+- **An order fills once.** What the participation cap or the leverage limit cuts off is
+  cancelled, not worked over the following days.
+- **Costs are a model.** Spread and slippage are flat basis points (plus an optional
+  volume term), not measured from quotes. Exchange and regulatory fees, stamp duties,
+  and taxes are not included; margin interest and interest on idle cash are zero.
+- **Shorting is simplified**: one borrow rate, always available, no locates, no recalls,
+  no margin calls. Gross exposure is limited when an order is filled, not afterwards, so
+  a position can drift above the limit as prices move.
+- **Dividends are paid on the ex-date** rather than the later payment date, and a split
+  that leaves a fraction of a share keeps the fraction instead of paying cash.
+- **The vectorized engine holds fractional shares** and reinvests dividends in the stock
+  that paid them at once (it uses total-return prices); the event engine receives cash
+  and reinvests on the next rebalance. This is the main reason the two differ slightly.
+- **A daily rebalance pays the minimum commission on every tiny trade.** That is what a
+  broker would charge, but nobody would send those orders. Use `min_trade_weight` or a
+  weekly or monthly schedule.
+- **Survivorship bias is not handled.** A symbol cannot be traded before its first bar,
+  but the universe is still a list of today's survivors (see the first point above).
+- **One currency (USD), no futures, options, or intraday data.**
+- **The reference strategies are test fixtures.** Their results, and those of anything
+  else run on a hand-picked universe over one period, are not evidence of skill.
+
 ## Design decisions
 
 Where the spec left room, the more conservative, correctness-first option was chosen.
@@ -425,6 +689,57 @@ Where the spec left room, the more conservative, correctness-first option was ch
 - **Group membership is not stored in the database.** Groups are a view over the config;
   `--universe` just expands to a list of symbols.
 
+### Backtester
+
+When unsure, the more pessimistic assumption was taken: a backtest should be harder to
+pass than real trading.
+
+- **Orders are sized at the decision, not at the fill.** The usual vectorized shortcut,
+  "the portfolio has exactly the target weights at the open", sizes trades with a price
+  the decision could not know. On noisy opens that quietly earns a rebalancing premium:
+  on synthetic data it added about 0.4% a year to a daily-rebalanced basket. Both engines
+  instead fix the share count on the decision close and let the fill price fall where it
+  may; a purchase the gap made unaffordable is cut to the leverage limit.
+- **Limit orders must be traded through.** A bar whose low only touches a buy limit does
+  not fill it. A limit order that gaps through its price fills at the open, which is
+  better than the limit, and then pays spread and slippage like a market order (but
+  never more than its limit).
+- **Costs are on by default**: IBKR tiered commissions, 1 bp of half-spread, 2 bp of
+  slippage, and a 1% borrow rate. `spread_bps` means the half-spread, the cost of one
+  trade, as the spec defines it.
+- **The commission minimum beats the 1% cap** when the two conflict on a very small order.
+- **No volume history means no fill** for any symbol with a participation cap or volume
+  impact configured: on its first bar the average volume is unknown.
+- **Borrow fees accrue per calendar day on a 360-day year**, so a weekend costs three
+  days.
+- **Sells are matched before buys** within an open or a close, so a switch between two
+  holdings can pay for itself. Everything submitted during a session, in `on_bar` or
+  `on_fill`, waits for the next one.
+- **The before-costs run keeps the participation cap.** It is the same strategy with
+  costs at zero, so the two curves differ by costs and nothing else.
+- **Event-engine history is adjusted point-in-time.** `ctx.history()` rescales the stored
+  adjusted series so that today's value is the traded price, which removes every
+  corporate action after the current bar.
+- **Weights on a symbol without data are dropped, not redistributed.** The engine will
+  not guess how a strategy wants its weights renormalized.
+- **Runs are logged to their own database**, `data/backtests.duckdb`, not to
+  `market.duckdb`: research code never opens the market data for writing, and a backtest
+  cannot collide with the scheduled ingest's write lock. The table has two columns
+  beyond the spec's, `name` and `status`.
+- **Failed runs are returned, not raised**, by `runner.execute`, after being logged.
+- **Zero-risk ratios are NaN.** A flat or perfectly steady curve has no Sharpe ratio;
+  reporting infinity or zero would both be wrong.
+- **Realized P&L is before commissions** and includes dividends; fees are tracked
+  separately, so `equity = initial cash + realized + unrealized - fees` always holds.
+- **Reports use matplotlib and inline SVG**, not plotly: a self-contained plotly page
+  carries megabytes of JavaScript per report. The charts are static.
+- **Extra modules beyond the spec's layout**: `data.py` (the bundle of bars and actions
+  both engines read), `result.py` (the tables both engines return), and `runner.py`
+  (config to result to report to registry). Indicator helpers live in `strategy.py`.
+- **`EngineCore`** (in `event_engine.py`) is the interface the spec's optional Rust core
+  would implement: stepping time, the account, the order book, and price history.
+  `PythonCore` is the reference. The Rust core itself is not built.
+
 ## Development
 
 ```
@@ -435,7 +750,8 @@ uv run mypy src
 uv run pre-commit install       # once: run the checks on every commit
 ```
 
-Tests use small static CSVs in `tests/fixtures/` and never touch the network.
+Tests use small static CSVs in `tests/fixtures/` and seeded synthetic price series, and
+never touch the network.
 
 Continuous integration (`.github/workflows/ci.yml`) runs the lint, format, type, and test
 commands above on Ubuntu and Windows with Python 3.12 and 3.13 for every push and pull
