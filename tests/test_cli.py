@@ -160,3 +160,13 @@ def test_invalid_group_config_fails_with_clear_error(project: FakeSource, tmp_pa
     result = runner.invoke(app, ["ingest", "--config", str(broken), "--universe", "first"])
     assert result.exit_code == 1
     assert "group 'first' lists symbols that are not defined in universe: ZZZ" in result.output
+
+
+def test_ingest_fails_fast_when_the_source_is_unreachable(project: FakeSource) -> None:
+    project.dies_after = 0
+    result = runner.invoke(app, ["ingest"])
+    assert result.exit_code == 1
+    assert "could not reach the 'yahoo' source" in result.output
+    assert "connection refused" in result.output
+    assert "skipped" in result.output
+    assert project.calls == []

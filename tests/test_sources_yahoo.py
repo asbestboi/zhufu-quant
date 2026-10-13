@@ -54,7 +54,7 @@ class FakeTicker:
         if self.failures > 0:
             self.failures -= 1
             raise ConnectionError("rate limited")
-        if kwargs.get("period") == "max":
+        if "period" in kwargs:  # "max" for actions, "5d" for the probe
             return self.frame
         days = self.frame.index.tz_localize(None)
         start, end = pd.Timestamp(kwargs["start"]), pd.Timestamp(kwargs["end"])
@@ -149,3 +149,19 @@ def test_backoff_is_capped() -> None:
     with pytest.raises(SourceError):
         with_retries(always_fails, max_retries=8, backoff_seconds=1.0, sleep=sleeps.append)
     assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+
+
+def test_probe_makes_one_request_and_never_retries(ticker: FakeTicker) -> None:
+    sleeps: list[float] = []
+    source_for(ticker, sleeps).probe()
+    assert len(ticker.requests) == 1
+    assert ticker.requests[0]["period"] == "5d"
+
+    ticker.failures = 1
+    with pytest.raises(SourceError, match="did not answer a test request: rate limited"):
+        source_for(ticker, sleeps).probe()
+    assert len(ticker.requests) == 2 and sleeps == []
+
+    empty = FakeTicker(ticker.frame.iloc[:0])
+    with pytest.raises(SourceError, match="no data"):
+        source_for(empty).probe()

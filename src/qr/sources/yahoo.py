@@ -28,6 +28,7 @@ from qr.frames import (
 )
 from qr.sources.base import DataSource, SourceError, with_retries
 
+PROBE_SYMBOL = "SPY"  # a ticker that will always exist, for the connectivity probe
 PRICE_DECIMALS = 6  # enough for any quoted price; removes float noise from un-adjusting
 _YAHOO_COLUMNS = {
     "Open": "open",
@@ -102,6 +103,17 @@ class YahooSource(DataSource):
             sleep=self._sleep,
             what=f"yahoo {what} {symbol}",
         )
+
+    def probe(self) -> None:
+        """Ask for a few recent SPY bars, once, without retries."""
+        try:
+            frame = self._ticker_factory(PROBE_SYMBOL).history(
+                period="5d", interval="1d", auto_adjust=False, actions=False, raise_errors=True
+            )
+        except Exception as exc:
+            raise SourceError(f"Yahoo did not answer a test request: {exc}") from exc
+        if frame is None or frame.empty:
+            raise SourceError("Yahoo answered a test request with no data")
 
     def _yahoo_actions(self, symbol: str) -> pd.DataFrame:
         """Splits and dividends as Yahoo reports them (dividends are split-adjusted)."""
