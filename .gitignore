@@ -1,0 +1,21 @@
+# Local market data: never committed
+data/
+*.duckdb
+*.duckdb.wal
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Notebooks
+.ipynb_checkpoints/
