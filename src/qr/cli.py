@@ -15,6 +15,10 @@ from rich.table import Table
 from qr import crosscheck as crosscheck_module
 from qr import storage
 from qr.adjust import Adjustment
+from qr.backtest.config import load_backtest_config
+from qr.backtest.registry import read_runs
+from qr.backtest.report import METRIC_ROWS, format_metric
+from qr.backtest.runner import execute
 from qr.config import ConfigError, UniverseConfig, db_path, load_config, load_env_file
 from qr.ingest import FAILED, PARTIAL, run_ingest
 from qr.load import get_bars
@@ -22,7 +26,9 @@ from qr.sources.base import SourceError
 from qr.storage import StorageError
 from qr.validate import summarize, validate_symbols
 
-app = typer.Typer(help="Personal quant research: market data pipeline.", no_args_is_help=True)
+app = typer.Typer(
+    help="Personal quant research: market data pipeline and backtesting.", no_args_is_help=True
+)
 console = Console()
 
 ConfigOption = Annotated[
@@ -301,6 +307,135 @@ def export(
     out.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(out, index=False)
     console.print(f"Wrote {len(frame):,} rows ({adjustment}) to {out}")
+
+
+# --------------------------------------------------------------------------- backtest
+
+backtest_app = typer.Typer(help="Run and compare backtests.", no_args_is_help=True)
+app.add_typer(backtest_app, name="backtest")
+
+ReportsDirOption = Annotated[
+    Path | None, typer.Option("--reports-dir", help="Where tearsheets go (default: ./reports).")
+]
+
+# registry column, heading, and how to show it
+_RUN_METRICS = [
+    ("sharpe", "Sharpe", "num"),
+    ("cagr", "CAGR", "pct"),
+    ("max_drawdown", "max drawdown", "pct"),
+    ("turnover", "turnover", "num"),
+]
+
+
+def _run_date(value: Any) -> str:
+    return "-" if pd.isna(value) else f"{pd.Timestamp(value):%Y-%m-%d %H:%M}"
+
+
+@backtest_app.command("run")
+def backtest_run(
+    config_file: Annotated[Path, typer.Argument(help="Backtest config (YAML).")],
+    notes: Annotated[str | None, typer.Option("--notes", help="A remark for the registry.")] = None,
+    config: ConfigOption = None,
+    data_dir: DataDirOption = None,
+    reports_dir: ReportsDirOption = None,
+) -> None:
+    """Run a backtest, write its HTML tearsheet, and log it to the registry."""
+    try:
+        backtest_config = load_backtest_config(config_file)
+    except ConfigError as exc:
+        raise _fail(str(exc)) from exc
+    outcome = execute(
+        backtest_config,
+        data_dir=data_dir,
+        reports_dir=reports_dir,
+        universe_config=config,
+        notes=notes,
+    )
+    if outcome.error is not None or outcome.result is None:
+        console.print(f"Logged as failed run {outcome.record.run_id}.")
+        raise _fail(str(outcome.error).strip("'\""))
+
+    result = outcome.result
+    table = Table(title=f"{backtest_config.name} ({backtest_config.engine} engine)")
+    table.add_column("metric")
+    columns = [("after costs", result.metrics), ("before costs", result.gross_metrics)]
+    if result.benchmark is not None:
+        columns.append((f"benchmark {backtest_config.benchmark}", result.benchmark_metrics))
+    for heading, _ in columns:
+        table.add_column(heading, justify="right")
+    for key, label, kind in METRIC_ROWS:
+        values = [metrics.get(key) for _, metrics in columns]
+        if any(value is not None and not pd.isna(value) for value in values):
+            table.add_row(label, *(format_metric(value, kind) for value in values))
+    console.print(table)
+    console.print(f"Run id:  {outcome.record.run_id}")
+    console.print(f"Report:  {outcome.record.report_path}")
+
+
+@backtest_app.command("list")
+def backtest_list(
+    strategy: Annotated[
+        str | None, typer.Option("--strategy", help="Only runs of this strategy.")
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, help="How many runs to show.")] = 20,
+    data_dir: DataDirOption = None,
+) -> None:
+    """Show recent runs from the registry, newest first."""
+    runs = read_runs(data_dir, strategy=strategy, limit=limit)
+    if runs.empty:
+        console.print("No backtest runs logged yet. Run `qr backtest run CONFIG`.")
+        return
+    table = Table(title="Backtest runs")
+    for column in ("run id", "created (UTC)", "name", "strategy", "engine", "status"):
+        table.add_column(column)
+    for _, heading, _ in _RUN_METRICS:
+        table.add_column(heading, justify="right")
+    for row in runs.to_dict("records"):
+        colour = "green" if row["status"] == "ok" else "red"
+        table.add_row(
+            str(row["run_id"]),
+            _run_date(row["created_at"]),
+            str(row["name"]),
+            str(row["strategy"]),
+            str(row["engine"]),
+            f"[{colour}]{row['status']}[/{colour}]",
+            *(format_metric(row[key], kind) for key, _, kind in _RUN_METRICS),
+        )
+    console.print(table)
+
+
+@backtest_app.command("compare")
+def backtest_compare(
+    run_ids: Annotated[list[str], typer.Argument(help="Run ids (unique prefixes are enough).")],
+    data_dir: DataDirOption = None,
+) -> None:
+    """Show the logged metrics of several runs side by side."""
+    runs = read_runs(data_dir, run_ids=run_ids)
+    chosen: list[dict[str, Any]] = []
+    for wanted in run_ids:
+        matches = runs[runs["run_id"].str.startswith(wanted)]
+        if len(matches) != 1:
+            problem = "no run" if matches.empty else f"{len(matches)} runs"
+            raise _fail(f"{problem} with an id starting with '{wanted}' (see `qr backtest list`)")
+        chosen.append({str(k): v for k, v in matches.iloc[0].to_dict().items()})
+    table = Table(title="Backtest comparison")
+    table.add_column("")
+    for run in chosen:
+        table.add_column(str(run["run_id"]), justify="right")
+    for field in ("name", "strategy", "engine", "status"):
+        table.add_row(field, *(str(run[field]) for run in chosen))
+    table.add_row(
+        "period", *(f"{_date(r['start_date'])} to {_date(r['end_date'])}" for r in chosen)
+    )
+    for key, heading, kind in _RUN_METRICS:
+        table.add_row(heading, *(format_metric(run[key], kind) for run in chosen))
+    table.add_row("config hash", *(str(run["config_hash"]) for run in chosen))
+    table.add_row("git commit", *(str(run["git_commit"] or "-")[:10] for run in chosen))
+    table.add_row("data written", *(str(run["data_snapshot"] or "-")[:16] for run in chosen))
+    console.print(table)
+    for run in chosen:
+        if run["report_path"]:
+            console.print(f"{run['run_id']}: {run['report_path']}")
 
 
 if __name__ == "__main__":

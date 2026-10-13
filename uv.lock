@@ -2898,6 +2898,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
+    { name = "matplotlib" },
     { name = "pandas" },
     { name = "pandas-market-calendars" },
     { name = "pyarrow" },
@@ -2916,7 +2917,6 @@ crypto = [
 [package.dev-dependencies]
 dev = [
     { name = "ipykernel" },
-    { name = "matplotlib" },
     { name = "mypy" },
     { name = "nbconvert" },
     { name = "pandas-stubs" },
@@ -2930,6 +2930,7 @@ dev = [
 requires-dist = [
     { name = "ccxt", marker = "extra == 'crypto'", specifier = ">=4.4" },
     { name = "duckdb", specifier = ">=1.1" },
+    { name = "matplotlib", specifier = ">=3.9" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "pandas-market-calendars", specifier = ">=4.4" },
     { name = "pyarrow", specifier = ">=17" },
@@ -2944,7 +2945,6 @@ provides-extras = ["crypto"]
 [package.metadata.requires-dev]
 dev = [
     { name = "ipykernel", specifier = ">=6.29" },
-    { name = "matplotlib", specifier = ">=3.9" },
     { name = "mypy", specifier = ">=1.11" },
     { name = "nbconvert", specifier = ">=7.16" },
     { name = "pandas-stubs", specifier = ">=2.2" },

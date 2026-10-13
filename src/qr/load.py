@@ -16,7 +16,7 @@ import pandas as pd
 from qr import snapshots, storage
 from qr.adjust import Adjustment, adjust_bars
 from qr.config import db_path, raw_dir
-from qr.frames import BAR_COLUMNS, VALUE_COLUMNS, to_timestamp
+from qr.frames import ACTION_COLUMNS, BAR_COLUMNS, VALUE_COLUMNS, to_timestamp
 
 
 def _symbol_list(symbols: list[str] | str) -> list[str]:
@@ -152,3 +152,67 @@ def list_symbols(active_only: bool = False, *, data_dir: Path | str | None = Non
     if active_only:
         instruments = instruments[instruments["is_active"].astype(bool)]
     return sorted(str(s) for s in instruments["symbol"])
+
+
+def _known(symbols: list[str], instruments: pd.DataFrame) -> None:
+    unknown = [s for s in symbols if s not in set(instruments["symbol"])]
+    if unknown:
+        raise KeyError(f"unknown symbols: {', '.join(unknown)}")
+
+
+def get_corporate_actions(
+    symbols: list[str] | str,
+    end: date | None = None,
+    *,
+    data_dir: Path | str | None = None,
+) -> pd.DataFrame:
+    """Splits and cash dividends for one or more symbols, up to and including ``end``.
+
+    Columns ``symbol, date, action, value`` sorted by date, symbol, then action. ``action``
+    is ``"split"`` (``value`` is the ratio: 2.0 for a 2:1 split) or ``"dividend"`` (``value``
+    is cash per share on the share basis of its ex-date, i.e. after a split sharing that
+    date). ``date`` is the ex-date. Raises ``KeyError`` for unknown symbols.
+    """
+    requested = _symbol_list(symbols)
+    with storage.connect(db_path(data_dir), read_only=True) as con:
+        _known(requested, storage.read_instruments(con))
+        actions = storage.read_corporate_actions(con, requested)
+    if end is not None:
+        actions = actions[actions["date"] <= to_timestamp(end)]
+    actions = actions.sort_values(["date", "symbol", "action"], kind="stable")
+    return actions[["symbol", *ACTION_COLUMNS]].reset_index(drop=True)
+
+
+def get_asset_classes(
+    symbols: list[str] | str, *, data_dir: Path | str | None = None
+) -> dict[str, str]:
+    """Asset class (``etf``, ``equity``, ``crypto``) of each symbol, in the order given."""
+    requested = _symbol_list(symbols)
+    with storage.connect(db_path(data_dir), read_only=True) as con:
+        instruments = storage.read_instruments(con)
+    _known(requested, instruments)
+    classes = instruments.set_index("symbol")["asset_class"]
+    return {symbol: str(classes[symbol]) for symbol in requested}
+
+
+def data_version(
+    symbols: list[str] | str,
+    end: date | None = None,
+    *,
+    data_dir: Path | str | None = None,
+) -> datetime | None:
+    """When the newest of these symbols' bars (up to ``end``) was last written (naive UTC).
+
+    Two runs that report the same value read the same bars, which is what makes a
+    backtest reproducible. None when no bars are stored.
+    """
+    requested = _symbol_list(symbols)
+    query = "SELECT max(ingested_at) FROM daily_bars WHERE list_contains(?, symbol)"
+    params: list[object] = [requested]
+    if end is not None:
+        query += " AND date <= ?"
+        params.append(end)
+    with storage.connect(db_path(data_dir), read_only=True) as con:
+        row = con.execute(query, params).fetchone()
+    latest = row[0] if row else None
+    return None if latest is None else pd.Timestamp(latest).to_pydatetime()
