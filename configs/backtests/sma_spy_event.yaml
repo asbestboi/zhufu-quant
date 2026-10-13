@@ -1,0 +1,18 @@
+# 50/200-day moving-average crossover on SPY, long or flat.
+name: sma_spy_event
+engine: event        # or: vectorized
+strategy: sma_crossover
+params: { fast: 50, slow: 200 }
+universe: [SPY]
+start: 2012-01-01
+end: 2024-12-31
+initial_cash: 10000
+benchmark: SPY
+execution: next_open
+rebalance: daily
+costs:
+  commission_model: ibkr_tiered
+  spread_bps: 1
+  slippage_bps: 2
+# min_trade_weight: skip top-ups below 0.5% of equity, which would each pay the minimum fee
+constraints: { long_only: true, max_gross_leverage: 1.0, min_trade_weight: 0.005 }

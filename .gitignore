@@ -24,3 +24,6 @@ docs/specs/
 
 # Output of the scheduled daily run
 logs/
+
+# Generated backtest tearsheets
+reports/

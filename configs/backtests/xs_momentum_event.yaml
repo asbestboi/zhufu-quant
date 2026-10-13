@@ -1,0 +1,17 @@
+# 12-1 month cross-sectional momentum: hold the 3 strongest of the universe.
+name: xs_momentum_event
+engine: event        # or: vectorized
+strategy: xs_momentum
+params: { lookback: 252, skip: 21, top_n: 3 }
+universe: [SPY, QQQ, IWM, TLT, GLD, AAPL, MSFT, KO, PEP, XOM, CVX, V, MA, HD, LOW, GS, MS]
+start: 2012-01-01
+end: 2024-12-31
+initial_cash: 10000
+benchmark: SPY
+execution: next_open
+rebalance: monthly
+costs:
+  commission_model: ibkr_tiered
+  spread_bps: 1
+  slippage_bps: 2
+constraints: { long_only: true, max_gross_leverage: 1.0, max_weight: 0.34 }

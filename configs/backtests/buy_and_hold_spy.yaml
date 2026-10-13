@@ -1,0 +1,16 @@
+# Buy and hold SPY: the reference every other run is compared with.
+name: buy_and_hold_spy
+engine: vectorized        # or: event
+strategy: buy_and_hold
+universe: [SPY]
+start: 2012-01-01
+end: 2024-12-31
+initial_cash: 10000
+benchmark: SPY
+execution: next_open
+rebalance: monthly      # each rebalance reinvests the dividends received as cash
+costs:
+  commission_model: ibkr_tiered
+  spread_bps: 1
+  slippage_bps: 2
+constraints: { long_only: true, max_gross_leverage: 1.0 }
