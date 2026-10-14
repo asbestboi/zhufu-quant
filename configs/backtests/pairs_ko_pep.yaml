@@ -1,0 +1,27 @@
+# Pairs trading on KO / PEP: the step 3 study (notebooks/pairs/). This is the base the
+# notebooks start from; they change the period and the parameters, never the costs.
+# Dates are the training period: the study looks at later years only at its very end.
+name: pairs_ko_pep
+engine: vectorized        # the pairs strategy has no event-engine version
+strategy: pairs
+params: { y: KO, x: PEP, beta_window: 252, z_window: 60, entry: 2.0, exit: 0.5, stop: 4.0 }
+universe: [KO, PEP]
+start: 2010-01-01
+end: 2018-12-31
+initial_cash: 10000
+benchmark: SPY
+execution: next_open      # decided at the close, traded at the next open
+rebalance: daily
+costs:
+  # IBKR commission on top of 5 bps per leg per trade (half-spread 2 + slippage 3):
+  # a little more than the spec's 5 bps, on purpose.
+  commission_model: ibkr_tiered
+  spread_bps: 2
+  slippage_bps: 3
+  borrow_rate: 0.005      # 0.5% a year on the short leg
+constraints:
+  long_only: false
+  max_gross_leverage: 1.0 # both legs together are at most the account's equity
+  # Leave a leg alone until it has drifted by 5% of equity, so the hedge is not topped
+  # up with tiny trades every day.
+  min_trade_weight: 0.05

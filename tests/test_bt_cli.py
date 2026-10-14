@@ -126,7 +126,7 @@ constraints: { long_only: true, max_gross_leverage: 1.0 }
 def test_shipped_example_configs_are_valid() -> None:
     folder = Path(__file__).parent.parent / "configs" / "backtests"
     names = sorted(p.name for p in folder.glob("*.yaml"))
-    assert len(names) == 6
+    assert len(names) == 7
     for name in names:
         config = load_backtest_config(folder / name)
         assert config.strategy in STRATEGIES
