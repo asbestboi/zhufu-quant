@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from qr.backtest.data import MarketData
+from qr.backtest.runner import run_backtest
 from qr.backtest.strategies import build_strategy
 from qr.backtest.strategies.pairs import PairsWeights
 from qr.research.pairs import (
@@ -25,6 +26,7 @@ from qr.research.pairs import (
     round_trip_returns,
     round_trips,
     spread,
+    summarize,
 )
 from tests.bt_helpers import make_config, run
 
@@ -272,3 +274,32 @@ def test_fixed_beta_param_replaces_the_rolling_hedge_ratio() -> None:
     data = pair_market(400)
     strategy = PairsWeights("YY", "XX", beta=0.9)
     assert (strategy.hedge_ratio(data.adjusted) == 0.9).all()
+
+
+def test_summarize_reports_costs_trades_and_benchmark() -> None:
+    data = pair_market()
+    params = {
+        "y": "YY",
+        "x": "XX",
+        "beta_window": 120,
+        "z_window": 40,
+        "entry": 1.5,
+        "exit": 0.3,
+        "stop": 4.0,
+    }
+    config = make_config(
+        data,
+        engine="vectorized",
+        strategy="pairs",
+        params=params,
+        costs={"spread_bps": 2, "slippage_bps": 3, "borrow_rate": 0.005},
+        constraints={"max_gross_leverage": 1.0},
+        benchmark="XX",
+    )
+    closes = data.adjusted["close"].xs("XX", level="symbol")
+    summary = summarize(run_backtest(config, data, benchmark_closes=closes))
+    assert summary["round_trips"] >= 3
+    assert 0.0 <= summary["hit_rate"] <= 1.0
+    assert summary["total_costs"] > 0
+    assert summary["total_return"] < summary["total_return_gross"]
+    assert math.isfinite(summary["benchmark_cagr"])

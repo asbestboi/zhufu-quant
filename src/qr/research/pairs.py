@@ -16,11 +16,26 @@ Conventions:
 from __future__ import annotations
 
 import math
-from typing import Any, cast
+from datetime import date
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
 from statsmodels.tsa.stattools import coint
+
+if TYPE_CHECKING:
+    from qr.backtest.result import BacktestResult
+
+# --------------------------------------------------------------------------- the study
+#
+# The pairs, and the three periods of the study. Parameters are chosen on TRAIN only,
+# checked on VALIDATION, and TEST is looked at once, at the very end.
+
+MAIN_PAIR = ("KO", "PEP")
+COMPARISON_PAIRS = [("XOM", "CVX"), ("V", "MA"), ("HD", "LOW"), ("GS", "MS")]
+TRAIN = (date(2010, 1, 1), date(2018, 12, 31))
+VALIDATION = (date(2019, 1, 1), date(2022, 12, 31))
+TEST_START = date(2023, 1, 1)
 
 # --------------------------------------------------------------------------- prices
 
@@ -285,3 +300,38 @@ def round_trip_returns(trips: pd.DataFrame, equity: pd.Series) -> pd.Series:
             continue
         out.append(float(equity.iloc[end] / equity.iloc[start] - 1.0))
     return pd.Series(out, index=trips.index, name="return", dtype="float64")
+
+
+# --------------------------------------------------------------------------- summaries
+
+HEADLINE = ("total_return", "cagr", "sharpe", "max_drawdown")
+
+
+def summarize(result: BacktestResult) -> dict[str, float]:
+    """The study's headline numbers for a single-pair backtest of the ``pairs`` strategy.
+
+    Engine metrics after costs (``total_return``, ``cagr``, ``sharpe``, ``max_drawdown``)
+    and before costs (``*_gross``), plus trade statistics computed from the spread
+    position: ``round_trips``, ``average_holding_days``, and ``hit_rate`` (the share of
+    finished trades that made money after costs), and the benchmark's numbers
+    (``benchmark_*``) over the same sessions.
+    """
+    if result.net.weights is None:
+        raise ValueError("summarize needs a vectorized-engine result (it reads the weights)")
+    y = str(result.config.params["y"])
+    side = np.sign(result.net.weights[y]).astype("int64")
+    trips = round_trips(side)
+    finished = trips[trips["closed"].notna()]
+    returns = round_trip_returns(finished, result.net.equity)
+    out = {key: float(result.metrics[key]) for key in HEADLINE}
+    out |= {f"{key}_gross": float(result.gross_metrics[key]) for key in HEADLINE}
+    out |= {
+        "round_trips": float(len(trips)),
+        "average_holding_days": float(trips["days"].mean()) if len(trips) else math.nan,
+        "hit_rate": float((returns > 0).mean()) if len(returns) else math.nan,
+        "total_costs": float(result.metrics["total_costs"]),
+    }
+    out |= {
+        f"benchmark_{key}": float(result.benchmark_metrics.get(key, math.nan)) for key in HEADLINE
+    }
+    return out
