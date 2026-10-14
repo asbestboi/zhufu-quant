@@ -1,7 +1,8 @@
-"""Reference strategies, and the lookup from a config's ``strategy`` name to a class.
+"""Strategies, and the lookup from a config's ``strategy`` name to a class.
 
-These exist to validate the engines, not to make money. Each has a version for the
-vectorized engine and one for the event-driven engine.
+The reference strategies (buy and hold, SMA crossover, momentum) exist to validate the
+engines, not to make money; each has a version for both engines. ``pairs`` comes from
+the step 3 research and runs on the vectorized engine only.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from qr.backtest.strategies.buy_and_hold import BuyAndHoldEvents, BuyAndHoldWeights
+from qr.backtest.strategies.pairs import PairsWeights
 from qr.backtest.strategies.sma_crossover import SmaCrossoverEvents, SmaCrossoverWeights
 from qr.backtest.strategies.xs_momentum import XsMomentumEvents, XsMomentumWeights
 from qr.backtest.strategy import EventStrategy, WeightStrategy
@@ -27,6 +29,7 @@ STRATEGIES: dict[str, StrategyEntry] = {
     "buy_and_hold": StrategyEntry(BuyAndHoldWeights, BuyAndHoldEvents),
     "sma_crossover": StrategyEntry(SmaCrossoverWeights, SmaCrossoverEvents),
     "xs_momentum": StrategyEntry(XsMomentumWeights, XsMomentumEvents),
+    "pairs": StrategyEntry(PairsWeights, None),
 }
 
 
