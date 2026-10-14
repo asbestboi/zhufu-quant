@@ -27,3 +27,7 @@ logs/
 
 # Generated backtest tearsheets
 reports/
+
+# Private strategy configs and notebooks: live in the repo locally, never committed
+configs/private/
+notebooks/private/
