@@ -14,6 +14,7 @@ dependencies = [
     "pydantic>=2.8",
     "pyyaml>=6.0",
     "rich>=13",
+    "statsmodels>=0.14",
     "typer>=0.12",
     "yfinance>=0.2.50",
 ]
@@ -29,6 +30,7 @@ dev = [
     "ipykernel>=6.29",
     "mypy>=1.11",
     "nbconvert>=7.16",
+    "nbformat>=5.11.1",
     "pandas-stubs>=2.2",
     "pre-commit>=4.7.0",
     "pytest>=8.3",
@@ -61,5 +63,5 @@ strict = true
 files = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["yfinance.*", "ccxt.*", "pandas_market_calendars.*"]
+module = ["yfinance.*", "ccxt.*", "pandas_market_calendars.*", "statsmodels.*"]
 ignore_missing_imports = true
