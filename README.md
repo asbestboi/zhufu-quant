@@ -415,7 +415,7 @@ One YAML file per experiment in `configs/backtests/`. Unknown keys are rejected.
 ```yaml
 name: sma_crossover_spy     # used in the report file name and the registry
 engine: vectorized          # vectorized | event
-strategy: sma_crossover     # buy_and_hold | sma_crossover | xs_momentum | your own
+strategy: sma_crossover     # buy_and_hold | sma_crossover | xs_momentum | pairs | your own
 params: { fast: 50, slow: 200 }
 universe: [SPY]             # a list, or the name of a group in config/universe.yaml
 start: 2012-01-01           # first session traded; earlier bars warm up indicators
@@ -508,6 +508,34 @@ version of the data read, the period, Sharpe, CAGR, maximum drawdown, turnover, 
 report path, and notes. **Failed runs are logged too**, with status `failed` and the
 error as notes. Do not delete rows for ideas that did not work: the number of things
 tried is exactly what an honest significance test needs.
+
+## Research studies
+
+Step 3 uses the pipeline and the backtester to study trading ideas. Each study is a set
+of notebooks that explain every step in plain language, with the reusable code in
+`src/qr/research/` (tested in `tests/`).
+
+### Pairs trading: KO / PEP and four comparison pairs
+
+Does a simple pairs strategy on Coca-Cola and PepsiCo make money after costs, without
+hindsight? The notebooks live in [`notebooks/pairs/`](notebooks/pairs/) and will be
+published once the research is finished (`notebooks/` is gitignored until then):
+
+1. `01_intuition`: what a spread is, correlation, and why "it always comes back" is hindsight
+2. `02_cointegration`: correlation vs. cointegration, Engle-Granger, half-life, multiple testing
+3. `03_signals`: rolling hedge ratio, z-score, entry/exit/stop rules, the cost of hindsight
+4. `04_honest_backtest`: train 2010–2018, validation 2019–2022, test 2023 onwards (run once)
+5. `05_findings`: the results in plain language, and what to try next
+
+Code: `qr.research.pairs` (hedge ratios, spreads, cointegration tests, signals, leg
+weights) and the `pairs` strategy for the vectorized engine, with costs in
+`configs/backtests/pairs_ko_pep.yaml`.
+
+**Result: no.** 36 parameter combinations were tried on 2010–2018 KO / PEP. The chosen
+one made about 1% a year after costs in training and validation (Sharpe 0.26 and 0.20),
+then lost 1.4% a year in the test (Sharpe −0.14), against 22% a year for SPY. With the
+same parameters, no comparison pair made money after costs in all three periods; which
+pair "worked" changed from period to period like noise.
 
 ## How it works
 
@@ -739,6 +767,35 @@ pass than real trading.
 - **`EngineCore`** (in `event_engine.py`) is the interface the spec's optional Rust core
   would implement: stepping time, the account, the order book, and price history.
   `PythonCore` is the reference. The Rust core itself is not built.
+
+### Pairs-trading study
+
+- **Notebooks 01–03 only look at 2010–2018.** The spec plots the full history in the
+  first notebooks, but a chart of the validation or test years seen early biases every
+  later choice, so they stay hidden until notebook 04.
+- **Log prices are rebased to the first bar** (`log(price / first price)`).
+  Back-adjusted price levels change whenever a later dividend is paid, which would leak
+  future dividends into a spread built from levels; ratios of adjusted prices do not.
+- **The z-score re-hedges the whole window with today's hedge ratio**
+  (`rolling_spread_zscore`). Subtracting the rolling mean of a spread built with a
+  hedge ratio that changes every day mixes different spreads, and the result would
+  depend on the price level.
+- **The hedge ratio is frozen while a trade is open**, and a leg is only rebalanced
+  once it has drifted by 5% of equity (`min_trade_weight: 0.05`). Re-hedging every day
+  would pay the minimum commission on tiny trades.
+- **After a stop-out, no new trade until the z-score is back near zero**, so a spread
+  that has just broken out is not bought again on the way back.
+- **Costs above the spec's 5 bps per leg**: IBKR commission on top of 2 bps half-spread
+  and 3 bps slippage, plus 0.5% a year borrow on the short leg.
+- **Selection rule fixed in advance**: highest after-cost training Sharpe among
+  combinations with at least 10 trades. **No adjustment after validation**, although the
+  spec allowed a small one.
+- **The test period runs once.** The last cell of notebook 04 saves its results to
+  `reports/pairs/test_results.json`; run again, it shows those, and it refuses to run
+  with different parameters. Notebook 05 only reads that file.
+- **Hit rate and holding period come from the spread position** (the vectorized engine
+  does not track cost basis): a trade's return is the account's change from the close
+  before it was opened to the close of the day it was closed, costs included.
 
 ## Development
 
