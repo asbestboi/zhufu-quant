@@ -35,8 +35,9 @@ Speed and features come after.
 | 1 | Market data pipeline: ingest, validate, store, load | Done |
 | 1.1 | Pipeline polish: CI, fail-fast ingestion, cross-checking, named universes | Done |
 | 2 | Backtesting engine (vectorized and event-driven) | Done |
-| 3 | Strategy research, starting with a pairs-trading study | Planned |
-| 4 | Paper trading, then possibly live trading | Planned |
+| 3 | Strategy research, starting with a pairs-trading study | Next |
+| 4 | Paper trading, then possibly live trading | Later |
+| Stretch | Rust core for the hot paths | Optional |
 
 ## Setup
 
@@ -56,6 +57,9 @@ Data lives in `./data` (gitignored). Set `QR_DATA_DIR` to move it and `QR_CONFIG
 a different universe file; every CLI command also takes `--data-dir`, and the ones that
 read the universe take `--config`. The CLI reads a `.env` file from the folder it is run
 in (real environment variables win); see `.env.example`.
+
+Your own strategy configs and notebooks can go in `configs/private/` and
+`notebooks/private/`: both are gitignored, so they stay on your machine.
 
 ## CLI
 
@@ -627,6 +631,10 @@ Read this before trusting any backtest built on this data.
 - **One currency (USD), no futures, options, or intraday data.**
 - **The reference strategies are test fixtures.** Their results, and those of anything
   else run on a hand-picked universe over one period, are not evidence of skill.
+- **The momentum reference backtest is inflated by survivorship bias.** Its universe
+  (`configs/backtests/xs_momentum*.yaml`) was hand-picked from today's winners, so the
+  strategy can only ever pick stocks already known to have done well. Its CAGR and Sharpe
+  overstate what the rule would have earned in real time.
 
 ## Design decisions
 
