@@ -34,6 +34,21 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
 );
 """
 
+# Columns added after the first release, applied to old registries on the next write.
+# Additive only: old rows keep NULL in them.
+MIGRATIONS = [
+    # Provenance (research-discipline spec, part 1). See provenance.py.
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS data_hash TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS data_per_symbol_json TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS data_rows BIGINT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS data_as_of TIMESTAMP",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS python_version TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS uv_lock_sha256 TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS engine_core TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS rust_core_version TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS os TEXT",
+]
+
 COLUMNS = [
     "run_id",
     "created_at",
@@ -54,6 +69,15 @@ COLUMNS = [
     "notes",
     "name",
     "status",
+    "data_hash",
+    "data_per_symbol_json",
+    "data_rows",
+    "data_as_of",
+    "python_version",
+    "uv_lock_sha256",
+    "engine_core",
+    "rust_core_version",
+    "os",
 ]
 
 OK = "ok"
@@ -83,6 +107,15 @@ class RunRecord:
     notes: str
     name: str
     status: str
+    data_hash: str | None = None
+    data_per_symbol_json: str | None = None  # {"SYMBOL": sha256, ...}
+    data_rows: int | None = None
+    data_as_of: datetime | None = None  # None: the store as it was when the run started
+    python_version: str | None = None
+    uv_lock_sha256: str | None = None
+    engine_core: str | None = None  # the core that ran; None for the vectorized engine
+    rust_core_version: str | None = None
+    os: str | None = None
 
 
 def registry_path(data_directory: Path | str | None = None) -> Path:
@@ -121,6 +154,8 @@ def log_run(record: RunRecord, data_directory: Path | str | None = None) -> None
     """Append ``record`` to the registry, creating the database if needed."""
     with storage.connect(registry_path(data_directory)) as con:
         con.execute(SCHEMA)
+        for statement in MIGRATIONS:
+            con.execute(statement)
         placeholders = ", ".join("?" for _ in COLUMNS)
         con.execute(
             f"INSERT INTO backtest_runs ({', '.join(COLUMNS)}) VALUES ({placeholders})",
@@ -136,7 +171,8 @@ def read_runs(
 ) -> pd.DataFrame:
     """Logged runs, newest first; empty (with the right columns) when nothing is logged.
 
-    ``run_ids`` may be abbreviated: any unique prefix of a run id matches.
+    ``run_ids`` may be abbreviated: any unique prefix of a run id matches. A registry
+    written before a column existed reads that column as missing values.
     """
     path = registry_path(data_directory)
     if not path.exists():
@@ -154,4 +190,4 @@ def read_runs(
         query += " LIMIT ?"
         params.append(limit)
     with storage.connect(path, read_only=True) as con:
-        return con.execute(query, params).df()[COLUMNS]
+        return con.execute(query, params).df().reindex(columns=COLUMNS)
