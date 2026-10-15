@@ -21,6 +21,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.12", "3.13"]
+    env:
+      # The event-engine tests run on both cores; a missing Rust module is a failure here.
+      QR_REQUIRE_RUST_CORE: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -33,15 +36,58 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
+      # rustup is preinstalled on GitHub's Ubuntu and Windows runners.
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - name: Rust format
+        working-directory: rust/qr_core
+        run: cargo fmt --check
+
+      - name: Rust lint
+        working-directory: rust/qr_core
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Rust tests
+        working-directory: rust/qr_core
+        run: cargo test
+
+      - name: Build the Rust core into the environment
+        run: uv run --no-sync maturin develop --release -m rust/qr_core/Cargo.toml
+
       - name: Lint
-        run: uv run ruff check .
+        run: uv run --no-sync ruff check .
 
       - name: Check formatting
-        run: uv run ruff format --check .
+        run: uv run --no-sync ruff format --check .
 
       - name: Type-check
-        run: uv run mypy src
+        run: uv run --no-sync mypy src
 
       # Tests that hit a real provider are skipped unless --run-network is given.
-      - name: Test
-        run: uv run pytest
+      - name: Test (both cores)
+        run: uv run --no-sync pytest
+
+  python-only:
+    # Proves that nothing in qr needs Rust: no toolchain, no qr_core module.
+    name: ubuntu-latest / Python 3.13 / without the Rust core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: The Rust core is not installed
+        run: uv run --no-sync python -c "import importlib.util as u, sys; sys.exit(u.find_spec('qr_core') is not None)"
+
+      - name: Test (Rust-core tests skip, the fallback is tested)
+        run: uv run --no-sync pytest
