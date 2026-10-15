@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from qr.config import ConfigError
 
 EngineName = Literal["vectorized", "event"]
+EngineCoreName = Literal["python", "rust"]
 Execution = Literal["next_open", "next_close"]
 RebalanceFrequency = Literal["daily", "weekly", "monthly"]
 CommissionModel = Literal["ibkr_tiered", "ibkr_fixed", "per_share", "percent", "none"]
@@ -87,6 +88,9 @@ class BacktestConfig(_Model):
 
     name: str = Field(min_length=1)
     engine: EngineName
+    # Event engine only: run its loop, matching, and account in Python or in the Rust
+    # module `qr_core` (same results; falls back to Python if the module is missing).
+    engine_core: EngineCoreName = "python"
     strategy: str = Field(min_length=1)
     params: dict[str, Any] = Field(default_factory=dict)
     # A list of symbols, or the name of a group from config/universe.yaml.
@@ -121,8 +125,14 @@ class BacktestConfig(_Model):
         return json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
 
     def config_hash(self) -> str:
-        """Short hash of the canonical JSON, to spot reruns of one config in the registry."""
-        return hashlib.sha256(self.to_json().encode("utf-8")).hexdigest()[:16]
+        """Short hash of the canonical JSON, to spot reruns of one config in the registry.
+
+        ``engine_core`` is left out: both cores give identical results, so a run on either
+        is the same experiment (and hashes from before the option existed still match).
+        """
+        experiment = self.model_dump(mode="json", exclude={"engine_core"})
+        text = json.dumps(experiment, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def load_backtest_config(path: Path | str) -> BacktestConfig:

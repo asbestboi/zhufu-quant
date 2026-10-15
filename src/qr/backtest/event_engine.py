@@ -202,6 +202,33 @@ class EngineCore(ABC):
         """Every order submitted so far, with its current status."""
 
 
+def group_actions(data: MarketData, symbols: list[str]) -> dict[int, list[CorporateAction]]:
+    """Corporate actions by the row of ``data.dates`` they take effect on.
+
+    Within a row, splits come first, then dividends, each in the order of ``symbols``.
+    Shared by both cores, so they apply the same actions in the same order.
+    """
+    index = {s: j for j, s in enumerate(symbols)}
+    dates = data.dates
+    grouped: dict[int, list[CorporateAction]] = {}
+    actions = data.actions[data.actions["symbol"].isin(symbols)]
+    # An ex-date without a session (it should not happen) takes effect on the next one.
+    rows = dates.searchsorted(pd.DatetimeIndex(actions["date"]), side="left")
+    for row, record in zip(rows, actions.to_dict("records"), strict=True):
+        if row >= len(dates):
+            continue
+        action = CorporateAction(
+            symbol=str(record["symbol"]),
+            timestamp=dates[int(row)].to_pydatetime(),
+            action=record["action"],
+            value=float(record["value"]),
+        )
+        grouped.setdefault(int(row), []).append(action)
+    for todays in grouped.values():
+        todays.sort(key=lambda a: (a.action != SPLIT, index[a.symbol]))
+    return grouped
+
+
 class PythonCore(EngineCore):
     """The reference core, in plain Python."""
 
@@ -231,7 +258,7 @@ class PythonCore(EngineCore):
         self._gapless = [len(r) == 0 or r[-1] - r[0] + 1 == len(r) for r in self._rows]
         stamps = data.dates.to_numpy()
         self._days = np.diff(stamps, prepend=stamps[:1]) / np.timedelta64(1, "D")
-        self._actions = self._group_actions(data)
+        self._actions = group_actions(data, self.symbols)
 
         self._k = -1  # index of the current session; -1 before the first step
         self._t = self._first - 1  # the same position in data.dates
@@ -239,26 +266,6 @@ class PythonCore(EngineCore):
         self._account = Account(cash=float(config.initial_cash), timestamp=start)
         self._equity = self._account.equity  # refreshed once per session, read many times
         self._broker = SimBroker(self._account, costs, config.constraints, config.whole_shares)
-
-    def _group_actions(self, data: MarketData) -> dict[int, list[CorporateAction]]:
-        """Corporate actions by the row they take effect on: splits first, then dividends."""
-        grouped: dict[int, list[CorporateAction]] = {}
-        actions = data.actions[data.actions["symbol"].isin(self.symbols)]
-        # An ex-date without a session (it should not happen) takes effect on the next one.
-        rows = self._dates.searchsorted(pd.DatetimeIndex(actions["date"]), side="left")
-        for row, record in zip(rows, actions.to_dict("records"), strict=True):
-            if row >= len(self._dates):
-                continue
-            action = CorporateAction(
-                symbol=str(record["symbol"]),
-                timestamp=self._dates[int(row)].to_pydatetime(),
-                action=record["action"],
-                value=float(record["value"]),
-            )
-            grouped.setdefault(int(row), []).append(action)
-        for todays in grouped.values():
-            todays.sort(key=lambda a: (a.action != SPLIT, self._index[a.symbol]))
-        return grouped
 
     # ------------------------------------------------------------------ the loop
 
@@ -424,12 +431,18 @@ def run_event(
     data: MarketData,
     config: BacktestConfig,
     costs: CostModel,
-    core_factory: CoreFactory = PythonCore,
+    core_factory: CoreFactory | None = None,
 ) -> EngineOutput:
     """Backtest an event strategy and collect the same tables the vectorized engine gives.
 
-    The run is deterministic: the same data, config, and strategy give identical output.
+    The core is the config's ``engine_core`` (Python or Rust; see
+    :func:`qr.backtest.rust_core.select_core`) unless ``core_factory`` is given. The run is
+    deterministic: the same data, config, and strategy give identical output.
     """
+    if core_factory is None:
+        from qr.backtest.rust_core import select_core  # imported here: it imports this module
+
+        core_factory = select_core(config)
     core = core_factory(data, config, costs)
     ctx = Context(core)
     dates: list[datetime] = []
