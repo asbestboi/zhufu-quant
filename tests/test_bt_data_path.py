@@ -15,6 +15,9 @@ from qr.backtest.strategy import Context, EventStrategy
 
 from .bt_helpers import FIVE_DAYS, bars, make_config, run
 
+# Every test here runs on both event-engine cores (see the engine_core fixture).
+pytestmark = pytest.mark.usefixtures("engine_core")
+
 # BBB has no bar on Jan 4: its history has a gap, and that session has no BBB bar.
 GAPPY = [row for row in FIVE_DAYS if row[0] != "2024-01-04"]
 

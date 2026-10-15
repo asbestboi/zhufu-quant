@@ -19,6 +19,9 @@ from qr.backtest.result import EngineOutput
 
 from .bt_helpers import make_config, run, synthetic_bars, synthetic_market
 
+# Every test here runs on both event-engine cores (see the engine_core fixture).
+pytestmark = pytest.mark.usefixtures("engine_core")
+
 STRATEGIES: list[tuple[str, dict[str, Any], str]] = [
     ("buy_and_hold", {}, "daily"),
     ("sma_crossover", {"fast": 10, "slow": 40}, "daily"),

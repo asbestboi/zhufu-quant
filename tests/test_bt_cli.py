@@ -23,6 +23,9 @@ from qr.config import ConfigError, db_path
 from .bt_helpers import make_config, synthetic_bars, synthetic_market
 from .conftest import AFTER_JAN_16
 
+# Every test here runs on both event-engine cores (see the engine_core fixture).
+pytestmark = pytest.mark.usefixtures("engine_core")
+
 runner = CliRunner()
 
 UNIVERSE = """

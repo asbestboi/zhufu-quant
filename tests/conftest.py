@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterator
 from datetime import date, datetime
 from pathlib import Path
@@ -10,6 +11,7 @@ import pandas as pd
 import pytest
 
 from qr import storage
+from qr.backtest.rust_core import CORE_ENV_VAR, REQUIRE_ENV_VAR, rust_available
 from qr.config import UniverseConfig
 from qr.frames import empty_actions, normalize_actions, normalize_bars
 from qr.sources.base import DataSource, SourceError
@@ -31,6 +33,23 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if "network" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.fixture(params=["python", "rust"])
+def engine_core(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Run a test once per event-engine core, by setting ``QR_ENGINE_CORE``.
+
+    Modules opt in with ``pytestmark = pytest.mark.usefixtures("engine_core")``. Without
+    the compiled Rust module the Rust run is skipped, unless ``QR_REQUIRE_RUST_CORE=1``
+    (set in CI), which makes a missing module a failure.
+    """
+    core: str = request.param
+    if core == "rust" and not rust_available():
+        if os.environ.get(REQUIRE_ENV_VAR) == "1":
+            pytest.fail("QR_REQUIRE_RUST_CORE=1 but the qr_core module is not installed")
+        pytest.skip("the Rust core (qr_core) is not built")
+    monkeypatch.setenv(CORE_ENV_VAR, core)
+    return core
 
 
 def load_bars(name: str) -> pd.DataFrame:
