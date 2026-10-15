@@ -472,3 +472,67 @@ def test_scope_choices_come_from_the_config(project: Path) -> None:
     cfg = m.universe()
     assert cfg is not None
     assert m.ask_scope(cfg, "Update") == Scope("universe", group="pairs")
+
+
+# --------------------------------------------------------------------------- screens
+
+CLEAR = "\x1b[2J"
+ALT_ON, ALT_OFF = "\x1b[?1049h", "\x1b[?1049l"
+
+
+def terminal() -> tuple[Console, io.StringIO]:
+    out = io.StringIO()
+    return Console(file=out, width=100, force_terminal=True, color_system=None), out
+
+
+def test_every_screen_starts_clean_with_a_breadcrumb(project: Path) -> None:
+    console, out = terminal()
+    Menu(Scripted(["Data", "Coverage status", BACK, QUIT]), console).run()
+    screens = out.getvalue().split(CLEAR)[1:]
+    # main menu, Data, the status action, Data again, main menu again
+    assert len(screens) == 5
+    assert menu.BREADCRUMB.join(["Main menu", "Data", "Coverage status"]) in screens[2]
+    assert "Running: qr status" in screens[2]
+    assert "Running: qr status" not in screens[3]  # the next screen no longer shows it
+
+
+def test_the_logo_tops_every_screen(project: Path) -> None:
+    console, out = terminal()
+    Menu(Scripted(["Data", BACK, QUIT]), console, banner=True).run()
+    screens = out.getvalue().split(CLEAR)[1:]
+    assert len(screens) == 3 and all("/____/" in screen for screen in screens)
+
+
+def test_a_notice_shows_once_on_the_next_screen(project: Path) -> None:
+    console, out = terminal()
+    Menu(Scripted(["Backtests", KeyboardInterrupt, "Data", BACK, QUIT]), console).run()
+    screens = out.getvalue().split(CLEAR)[1:]
+    with_notice = [s for s in screens if "Back to the main menu." in s]
+    assert len(with_notice) == 1
+
+
+def test_the_menu_uses_the_alternate_screen_and_always_leaves_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    console, out = terminal()
+    monkeypatch.setattr(menu, "QuestionaryPrompter", lambda: Scripted([QUIT]))
+    tui.run(no_banner=True, console=console)
+    text = out.getvalue()
+    assert text.startswith(ALT_ON) and text.rstrip().endswith(ALT_OFF)
+
+    console, out = terminal()
+
+    def broken() -> Scripted:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(menu, "QuestionaryPrompter", broken)
+    with pytest.raises(RuntimeError):
+        tui.run(no_banner=True, console=console)
+    assert ALT_OFF in out.getvalue()  # the terminal is restored even after an error
+
+
+def test_no_screen_control_outside_a_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(menu, "QuestionaryPrompter", lambda: Scripted([QUIT]))
+    out = io.StringIO()
+    tui.run(no_banner=True, console=Console(file=out, width=100))
+    assert "\x1b[" not in out.getvalue()
