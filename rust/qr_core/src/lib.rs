@@ -6,6 +6,7 @@ pub mod account;
 pub mod broker;
 pub mod corporate;
 pub mod costs;
+pub mod engine;
 pub mod error;
 pub mod numeric;
 pub mod orders;
