@@ -7,6 +7,10 @@ a scripted stand-in in tests), turns the answers into an
 Navigation: every list has a Back entry, and Ctrl+C goes back one level (out of a question
 or a running command back to its menu, out of a menu back to the main menu, and out of the
 main menu to the shell, with exit code 0).
+
+Every screen starts from a clean terminal: the menu clears it and redraws the logo, where
+you are (``Main menu > Data``), and the list, so answered questions and old output do not
+pile up. A command's output stays until you press a key.
 """
 
 from __future__ import annotations
@@ -14,13 +18,14 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import Callable, Hashable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 import pandas as pd
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from qr.backtest.config import load_backtest_config
 from qr.backtest.registry import read_runs
@@ -31,6 +36,7 @@ from qr.tui import actions
 from qr.tui.actions import ALL, GROUP, PICK, Invocation, Scope
 
 BACK = "← Back"
+BREADCRUMB = " \u203a "  # a single right-pointing angle quote between the levels
 QUIT = "Quit"
 CONFIG_FOLDERS = (Path("configs/backtests"), Path("configs/private"))
 TIINGO_HOURLY_LIMIT = 50  # free tier, requests an hour
@@ -89,10 +95,35 @@ class QuestionaryPrompter:
 
 @dataclass
 class Menu:
-    """The menu's state: where to ask questions and where to print."""
+    """The menu's state: where to ask questions, where to print, and where we are."""
 
     prompter: Prompter
     console: Console
+    banner: bool = False  # draw the logo at the top of every screen
+    path: list[str] = field(default_factory=list)  # the breadcrumb, e.g. Main menu > Data
+    notice: str = ""  # a one-off message for the top of the next screen
+    _info: str | None = None
+
+    # ------------------------------------------------------------------ screens
+
+    def screen(self) -> None:
+        """Clear the terminal and draw the header: logo, breadcrumb, and any notice."""
+        from qr.tui.banner import colour_enabled, info_line, logo_lines
+
+        self.console.clear()
+        if self.banner:
+            style = "bold cyan" if colour_enabled() else ""
+            self.console.print(Text("\n".join(logo_lines(self.console.width)), style=style))
+            if self._info is None:  # the git lookup is done once, not on every screen
+                self._info = info_line()
+            self.console.print(Text(self._info, style="dim"))
+            self.console.print()
+        if self.path:
+            self.console.print(Text(BREADCRUMB.join(self.path), style="bold"))
+        if self.notice:
+            self.console.print(Text(self.notice, style="dim"))
+            self.notice = ""
+        self.console.print()
 
     # ------------------------------------------------------------------ navigation
 
@@ -103,7 +134,9 @@ class Menu:
             "Backtests": self.backtest_menu,
             "Settings / info": self.settings_menu,
         }
+        self.path = ["Main menu"]
         while True:
+            self.screen()
             try:
                 choice = self.prompter.select("Main menu", [*sections, QUIT])
             except KeyboardInterrupt:
@@ -113,18 +146,27 @@ class Menu:
             try:
                 sections[choice]()
             except KeyboardInterrupt:
-                self.console.print("[dim]Back to the main menu.[/dim]")
+                self.notice = "Back to the main menu."
 
     def submenu(self, title: str, items: dict[str, Callable[[], None]]) -> None:
         """A list of actions with a Back entry. Ctrl+C here goes back to the main menu."""
-        while True:
-            choice = self.prompter.select(title, [*items, BACK])
-            if choice == BACK:
-                return
-            try:
-                items[choice]()
-            except KeyboardInterrupt:
-                self.console.print(f"\n[dim]Cancelled. Back to {title}.[/dim]")
+        self.path.append(title)
+        try:
+            while True:
+                self.screen()
+                choice = self.prompter.select(title, [*items, BACK])
+                if choice == BACK:
+                    return
+                self.path.append(choice)
+                self.screen()  # the action's questions and output start on a clean screen
+                try:
+                    items[choice]()
+                except KeyboardInterrupt:
+                    self.notice = f"Cancelled. Back to {title}."
+                finally:
+                    self.path.pop()
+        finally:
+            self.path.pop()
 
     def data_menu(self) -> None:
         self.submenu(
