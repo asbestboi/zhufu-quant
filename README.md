@@ -37,7 +37,7 @@ Speed and features come after.
 | 2 | Backtesting engine (vectorized and event-driven) | Done |
 | 3 | Strategy research, starting with a pairs-trading study | Next |
 | 4 | Paper trading, then possibly live trading | Later |
-| Stretch | Rust core for the hot paths | Optional |
+| 2.5 | Faster event engine: array data path, then an optional Rust core | Done |
 
 ## Setup
 
@@ -429,6 +429,7 @@ One YAML file per experiment in `configs/backtests/`. Unknown keys are rejected.
 ```yaml
 name: sma_crossover_spy     # used in the report file name and the registry
 engine: vectorized          # vectorized | event
+engine_core: python         # event engine: python | rust (see "Rust core"; same results)
 strategy: sma_crossover     # buy_and_hold | sma_crossover | xs_momentum | pairs | your own
 params: { fast: 50, slow: 200 }
 universe: [SPY]             # a list, or the name of a group in config/universe.yaml
@@ -823,6 +824,69 @@ pass than real trading.
 - **Hit rate and holding period come from the spread position** (the vectorized engine
   does not track cost basis): a trade's return is the account's change from the close
   before it was opened to the close of the day it was closed, costs included.
+
+## Rust core
+
+The event engine can run its core in Rust: the module `qr_core`, in
+[`rust/qr_core/`](rust/qr_core/). It is optional. Nothing in `qr` needs it, the Python
+core stays the reference and the default, and both give **identical results**, bit for
+bit (`tests/test_bt_rust_core.py` checks every reference strategy and a 500-symbol market).
+
+**What is in Rust, and why.** Profiling showed the event engine's time going into pandas
+objects built for strategies, not into order matching (`docs/perf/baseline.md`). That
+was fixed in Python first. The Rust core then takes over everything between strategy
+calls:
+
+- the **bar store**: every bar in flat arrays owned by Rust. `ctx.history()` returns
+  read-only NumPy views of it without copying where it can (unadjusted prices and
+  volume), and these views cannot be made writable from Python;
+- the **event loop**, splits and dividends, **order matching**, fills, **costs**, and the
+  **account**.
+
+Strategies, configs, the vectorized engine, metrics, and reports stay in Python, and
+strategies run unchanged on either core. The Rust code is written to be read by someone
+learning Rust, with comments on ownership, borrowing, `Result`, and traits where they
+first appear; `lib.rs` lists the modules.
+
+**Building it on Arch Linux:**
+
+```
+sudo pacman -S --needed rustup base-devel   # rustup manages Rust; base-devel has the linker
+rustup default stable
+rustup component add clippy rustfmt
+uv sync                                     # maturin comes with the dev dependencies
+uv run maturin develop --release -m rust/qr_core/Cargo.toml
+```
+
+On **Windows**, install Rust with `rustup-init.exe` from [rustup.rs](https://rustup.rs)
+together with the "Desktop development with C++" workload of the Visual Studio Build Tools
+(the MSVC linker), then run the same `uv sync` and `maturin develop` commands. `uv sync`
+removes packages that are not in the lockfile, so run `maturin develop` again after it;
+`uv run` leaves the module in place.
+
+**Switching cores.** Set `engine_core: rust` in a backtest config, or override every run
+with an environment variable: `QR_ENGINE_CORE=rust uv run qr backtest run ...` (or
+`python`). If the module is not built, the Python core is used and a warning says how to
+build it; `QR_REQUIRE_RUST_CORE=1` turns that into an error. The core is left out of the
+config hash, since it does not change the result.
+
+**Checks:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test` in `rust/qr_core/`; `uv run pytest` runs every event-engine test on both
+cores (Rust skipped if not built). CI does all of this on Ubuntu and Windows, plus one job
+without Rust to show the Python fallback works.
+
+**Results** (`docs/perf/results.md`; one simulation, laptop i7-8650U):
+
+| Event engine | Before | Python, array data path | Rust core |
+| --- | ---: | ---: | ---: |
+| SMA crossover, 17 symbols, 13 years | 4.61 s | 1.38 s | 0.54 s |
+| Momentum, 17 symbols | 0.47 s | 0.17 s | 0.08 s |
+| Buy and hold, 17 symbols | 0.36 s | 0.37 s | 0.12 s |
+| Momentum, 500 synthetic symbols, 15 years | 10.9 s | 2.91 s | 1.97 s |
+| 200 SMA crossover runs on SPY | 79.4 s | 32.9 s | 14.4 s |
+
+Most of the gain came from the Python fix; Rust roughly doubles it again. What remains is
+mostly the strategies' own Python and NumPy code and building the result tables.
 
 ## Development
 
