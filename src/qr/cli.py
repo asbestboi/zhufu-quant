@@ -26,9 +26,7 @@ from qr.sources.base import SourceError
 from qr.storage import StorageError
 from qr.validate import summarize, validate_symbols
 
-app = typer.Typer(
-    help="Personal quant research: market data pipeline and backtesting.", no_args_is_help=True
-)
+app = typer.Typer(help="Personal quant research: market data pipeline and backtesting.")
 console = Console()
 
 ConfigOption = Annotated[
@@ -45,11 +43,16 @@ UniverseOption = Annotated[
 ]
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx: typer.Context,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show debug logs.")] = False,
 ) -> None:
-    """Set up logging and read ``.env`` for every command."""
+    """Set up logging and read ``.env`` for every command.
+
+    Run without a command, ``qr`` opens the interactive menu in a terminal and prints this
+    help everywhere else (scripts, schedulers, CI), so it never waits for input there.
+    """
     load_env_file()
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
@@ -59,6 +62,30 @@ def main(
     # Third-party chatter is only useful when debugging.
     for noisy in ("yfinance", "peewee", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.DEBUG if verbose else logging.CRITICAL)
+    if ctx.invoked_subcommand is None:
+        _menu_or_help(ctx, no_banner=False)
+
+
+def _menu_or_help(ctx: typer.Context, no_banner: bool) -> None:
+    """Open the menu in an interactive terminal; otherwise print the help and exit 0."""
+    from qr import tui  # imported here: the menu's libraries are only needed in a terminal
+
+    if not tui.is_interactive():
+        root = ctx.find_root()
+        root.command.get_help(root)  # Typer prints the help itself
+        raise typer.Exit(code=0)
+    tui.run(no_banner=no_banner)
+
+
+@app.command()
+def menu(
+    ctx: typer.Context,
+    no_banner: Annotated[
+        bool, typer.Option("--no-banner", help="Skip the logo (or set QR_NO_BANNER=1).")
+    ] = False,
+) -> None:
+    """Open the interactive menu (also what `qr` alone does in a terminal)."""
+    _menu_or_help(ctx, no_banner)
 
 
 def _fail(message: str) -> typer.Exit:
@@ -338,12 +365,34 @@ def backtest_run(
     config: ConfigOption = None,
     data_dir: DataDirOption = None,
     reports_dir: ReportsDirOption = None,
+    engine: Annotated[
+        str | None,
+        typer.Option("--engine", help="Override the config's engine: vectorized | event."),
+    ] = None,
+    engine_core: Annotated[
+        str | None,
+        typer.Option(
+            "--engine-core",
+            help="Event-engine core for this run: python | rust (overrides the config "
+            "and QR_ENGINE_CORE).",
+        ),
+    ] = None,
 ) -> None:
     """Run a backtest, write its HTML tearsheet, and log it to the registry."""
     try:
         backtest_config = load_backtest_config(config_file)
     except ConfigError as exc:
         raise _fail(str(exc)) from exc
+    if engine is not None:
+        if engine not in ("vectorized", "event"):
+            raise _fail(f"unknown engine '{engine}' (use vectorized or event)")
+        backtest_config = backtest_config.model_copy(update={"engine": engine})
+    if engine_core is not None:
+        if engine_core not in ("python", "rust"):
+            raise _fail(f"unknown engine core '{engine_core}' (use python or rust)")
+        backtest_config = backtest_config.model_copy(update={"engine_core": engine_core})
+        # The environment variable outranks the config, so set it for this run too.
+        os.environ["QR_ENGINE_CORE"] = engine_core
     outcome = execute(
         backtest_config,
         data_dir=data_dir,

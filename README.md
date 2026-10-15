@@ -65,19 +65,60 @@ Your own strategy configs and notebooks can go in `configs/private/` and
 
 | Command | What it does |
 | --- | --- |
+| `qr` / `qr menu [--no-banner]` | The interactive menu (see below). In a script, `qr` alone prints this help. |
 | `qr init` | Create the database and tables. Safe to repeat. |
 | `qr ingest [--symbols X,Y \| --universe NAME]` | Incremental download, then quality checks. Exits non-zero if any symbol failed or came back incomplete, or a source was unreachable. |
 | `qr validate [--symbols X,Y \| --universe NAME]` | Re-run the quality checks and print a summary of open findings. Exits non-zero if any finding has severity `error`. |
 | `qr status [--universe NAME]` | Per-symbol coverage: first/last date, row count, open errors and warnings. |
 | `qr crosscheck [--symbols X,Y \| --universe NAME] [--days 365]` | Compare stored closes and splits with a second source (Tiingo). See [Cross-checking](#cross-checking-against-a-second-source). |
 | `qr export SYMBOL --out f.csv [--adjustment none\|split\|total_return]` | Dump bars to CSV (total-return adjusted by default). |
-| `qr backtest run CONFIG.yaml [--notes TEXT] [--reports-dir DIR]` | Run a backtest, write its HTML tearsheet, log it to the registry. Exits non-zero (and logs the run as failed) if it could not run. |
+| `qr backtest run CONFIG.yaml [--notes TEXT] [--reports-dir DIR] [--engine vectorized\|event] [--engine-core python\|rust]` | Run a backtest, write its HTML tearsheet, log it to the registry. `--engine` and `--engine-core` override the config for this run. Exits non-zero (and logs the run as failed) if it could not run. |
 | `qr backtest list [--strategy NAME] [--limit 20]` | Recent runs from the registry. |
 | `qr backtest compare RUN_ID RUN_ID ...` | Side-by-side metrics of logged runs; unique id prefixes are enough. |
 
 Add `-v` before the command for debug logs: `qr -v ingest`. `--universe` takes the name
 of a group from the config's `groups:` section; using it together with `--symbols` is an
 error.
+
+### Interactive menu
+
+Run `qr` on its own in a terminal (or `qr menu`) to get an arrow-key menu over all of the
+above, so you do not have to remember commands and flags:
+
+```
+ _____   __  ____  __________  __   ____  __  _____    _   ________
+/__  /  / / / / / / / ____/ / / /  / __ \/ / / /   |  / | / /_  __/
+  / /  / /_/ / / / / /_  / / / /  / / / / / / / /| | /  |/ / / /
+ / /__/ __  / /_/ / __/ / /_/ /  / /_/ / /_/ / ___ |/ /|  / / /
+/____/_/ /_/\____/_/    \____/   \___\_\____/_/  |_/_/ |_/ /_/
+qr 0.1.0  ·  branch main  ·  engine_core python (default)
+
+? Main menu (Use arrow keys)
+ » Data
+   Backtests
+   Settings / info
+   Quit
+```
+
+- **Data**: update (ingest), validate, coverage status, cross-check against Tiingo, export
+  a symbol to CSV. Symbols and universe groups come from `config/universe.yaml`.
+- **Backtests**: run a config from `configs/backtests/` or `configs/private/` (optionally
+  with another engine or engine core), list and compare recent runs, open a tearsheet in
+  the browser.
+- **Settings / info**: a summary of the configuration (it says whether `TIINGO_API_KEY` is
+  set, never what it is) and the list of commands.
+
+Before running anything the menu prints the equivalent command, for example
+`Running: qr ingest --universe pairs`, so you can learn the commands and copy them into
+scripts. It runs the command's own code, so the result is the same. Slow or expensive
+actions ask first (ingesting every symbol; a cross-check that would use many of Tiingo's
+roughly 50 free requests an hour). Every list has a Back entry, and Ctrl+C goes back one
+level, or quits from the main menu.
+
+The logo only appears in the menu. Turn it off with `qr menu --no-banner` or
+`QR_NO_BANNER=1`; `NO_COLOR=1` turns off colours. **Every command still works directly**,
+and `qr` alone never waits for input outside a terminal: in a pipe, a scheduled task, or
+CI it prints this help and exits with code 0.
 
 ### Running it daily
 
