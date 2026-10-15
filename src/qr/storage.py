@@ -57,6 +57,16 @@ CREATE TABLE IF NOT EXISTS ingestion_log (
 CREATE TABLE IF NOT EXISTS quality_issues (
   symbol TEXT, date DATE, check_name TEXT, severity TEXT, details TEXT, detected_at TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS snapshot_manifest (
+  path       TEXT PRIMARY KEY,  -- relative to the raw directory, with / separators
+  source     TEXT NOT NULL,
+  symbol     TEXT NOT NULL,
+  kind       TEXT NOT NULL,     -- 'bars' | 'actions'
+  fetched_at TIMESTAMP NOT NULL,
+  rows       BIGINT NOT NULL,
+  sha256     TEXT NOT NULL
+);  -- one row per raw snapshot file, written once and never changed
 """
 
 
@@ -282,6 +292,54 @@ def read_corporate_actions(con: Connection, symbols: Sequence[str]) -> pd.DataFr
     ).df()
     frame["date"] = to_dates(frame["date"]).to_numpy()
     return frame
+
+
+# --------------------------------------------------------------------------- snapshot manifest
+
+
+@dataclass(frozen=True)
+class ManifestEntry:
+    """One row of ``snapshot_manifest``: a raw snapshot file and its SHA-256."""
+
+    path: str
+    source: str
+    symbol: str
+    kind: str  # 'bars' | 'actions'
+    fetched_at: datetime
+    rows: int
+    sha256: str
+
+
+MANIFEST_COLUMNS = ["path", "source", "symbol", "kind", "fetched_at", "rows", "sha256"]
+
+
+def record_snapshots(con: Connection, entries: Sequence[ManifestEntry]) -> int:
+    """Add manifest rows for files not listed yet; return how many were added.
+
+    A file already in the manifest keeps its original row: snapshot files never change,
+    so the first hash recorded is the one to compare against later.
+    """
+    if not entries:
+        return 0
+    before = _manifest_count(con)
+    con.executemany(
+        f"INSERT INTO snapshot_manifest ({', '.join(MANIFEST_COLUMNS)}) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (path) DO NOTHING",
+        [[getattr(entry, column) for column in MANIFEST_COLUMNS] for entry in entries],
+    )
+    return _manifest_count(con) - before
+
+
+def _manifest_count(con: Connection) -> int:
+    row = con.execute("SELECT count(*) FROM snapshot_manifest").fetchone()
+    return int(row[0]) if row else 0
+
+
+def read_snapshot_manifest(con: Connection) -> pd.DataFrame:
+    """Every manifest row, ordered by source, symbol, and fetch time."""
+    return con.execute(
+        "SELECT * FROM snapshot_manifest ORDER BY source, symbol, fetched_at, kind"
+    ).df()
 
 
 # --------------------------------------------------------------------------- logs and issues

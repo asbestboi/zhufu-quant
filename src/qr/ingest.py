@@ -154,7 +154,10 @@ def _ingest_symbol(
         raise SourceError(f"{source.name} returned no rows for {symbol}")
 
     # Raw response goes to disk before anything can alter or reject it.
-    snapshots.write_snapshot(raw_root, source.name, symbol, bars, actions, now)
+    snapshot = snapshots.write_snapshot(raw_root, source.name, symbol, bars, actions, now)
+    storage.record_snapshots(
+        con, snapshots.manifest_entries(raw_root, source.name, symbol, snapshot)
+    )
 
     problems: list[str] = []
     issues: list[QualityIssue] = check_duplicates(symbol, bars)

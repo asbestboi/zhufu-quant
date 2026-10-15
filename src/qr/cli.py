@@ -13,13 +13,20 @@ from rich.console import Console
 from rich.table import Table
 
 from qr import crosscheck as crosscheck_module
-from qr import storage
+from qr import snapshots, storage
 from qr.adjust import Adjustment
 from qr.backtest.config import load_backtest_config
 from qr.backtest.registry import read_runs
 from qr.backtest.report import METRIC_ROWS, format_metric
 from qr.backtest.runner import execute
-from qr.config import ConfigError, UniverseConfig, db_path, load_config, load_env_file
+from qr.config import (
+    ConfigError,
+    UniverseConfig,
+    db_path,
+    load_config,
+    load_env_file,
+    raw_dir,
+)
 from qr.ingest import FAILED, PARTIAL, run_ingest
 from qr.load import get_bars
 from qr.sources.base import SourceError
@@ -334,6 +341,28 @@ def export(
     out.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(out, index=False)
     console.print(f"Wrote {len(frame):,} rows ({adjustment}) to {out}")
+
+
+# --------------------------------------------------------------------------- snapshots
+
+snapshots_app = typer.Typer(help="The raw snapshot files and their hashes.", no_args_is_help=True)
+app.add_typer(snapshots_app, name="snapshots")
+
+
+@snapshots_app.command("backfill")
+def snapshots_backfill(data_dir: DataDirOption = None) -> None:
+    """Hash raw snapshot files that are not in the manifest yet and record them."""
+    raw_root = raw_dir(data_dir)
+    try:
+        with storage.connect(db_path(data_dir)) as con:
+            storage.init_schema(con)
+            added, already = snapshots.backfill_manifest(con, raw_root)
+    except OSError as exc:
+        raise _fail(str(exc)) from exc
+    console.print(
+        f"Added {added:,} snapshot files to the manifest "
+        f"({already:,} were already listed) from {raw_root}"
+    )
 
 
 # --------------------------------------------------------------------------- backtest
