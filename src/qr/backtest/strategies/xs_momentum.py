@@ -8,6 +8,8 @@ Ties go to the symbol listed first in the universe.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import pandas as pd
 
 from qr.backtest.events import Bar
@@ -41,14 +43,14 @@ class XsMomentumEvents(EventStrategy):
         _check(lookback, skip, top_n)
         self.lookback, self.skip, self.top_n = lookback, skip, top_n
 
-    def on_bar(self, ctx: Context, bars: dict[str, Bar]) -> None:
+    def on_bar(self, ctx: Context, bars: Mapping[str, Bar]) -> None:
         if not ctx.is_rebalance:
             return
         momentum: dict[str, float] = {}
         for symbol in ctx.symbols:
             history = ctx.history(symbol, self.lookback + 1)
             if len(history) == self.lookback + 1:
-                momentum[symbol] = history.iloc[-1 - self.skip] / history.iloc[0] - 1.0
+                momentum[symbol] = history[-1 - self.skip] / history[0] - 1.0
         # sorted() is stable, so equal returns keep the universe's order.
         winners = sorted(momentum, key=lambda s: -momentum[s])[: self.top_n]
         for symbol in ctx.symbols:

@@ -7,6 +7,8 @@ simply all-in or all-out.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import pandas as pd
 
 from qr.backtest.events import Bar
@@ -44,11 +46,11 @@ class SmaCrossoverEvents(EventStrategy):
         _check(fast, slow)
         self.fast, self.slow = fast, slow
 
-    def on_bar(self, ctx: Context, bars: dict[str, Bar]) -> None:
+    def on_bar(self, ctx: Context, bars: Mapping[str, Bar]) -> None:
         if not ctx.is_rebalance:
             return
         for symbol in ctx.symbols:
-            prices = ctx.history(symbol, self.slow).to_numpy()
+            prices = ctx.history(symbol, self.slow)
             if len(prices) < self.slow:
                 continue  # still warming up: stay flat
             is_long = prices[-self.fast :].mean() > prices.mean()

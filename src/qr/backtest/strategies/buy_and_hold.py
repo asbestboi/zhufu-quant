@@ -7,6 +7,8 @@ restored on every rebalance date.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import pandas as pd
 
 from qr.backtest.events import Bar
@@ -30,7 +32,7 @@ class BuyAndHoldEvents(EventStrategy):
     def __init__(self) -> None:
         self._listed: set[str] = set()
 
-    def on_bar(self, ctx: Context, bars: dict[str, Bar]) -> None:
+    def on_bar(self, ctx: Context, bars: Mapping[str, Bar]) -> None:
         self._listed.update(bars)
         if not ctx.is_rebalance:
             return

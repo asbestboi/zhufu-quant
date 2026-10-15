@@ -11,6 +11,11 @@ A session ``t`` runs in this order, all in unadjusted prices:
    Whatever it submits now waits for session ``t+1``, so a decision made on the close of
    ``t`` can never be executed at a price from ``t``.
 
+Data reaches strategies without building pandas objects on every bar: the bars live in
+``(dates x symbols)`` NumPy arrays, ``history`` returns a read-only slice of them, and a
+session's bars are a :class:`SessionBars` mapping that makes a :class:`Bar` only for the
+symbols that are actually looked up.
+
 :class:`EngineCore` is everything a strategy's :class:`~qr.backtest.strategy.Context` and
 the driver :func:`run_event` need: time, the account, the order book, and price history.
 :class:`PythonCore` is the reference implementation; a faster core (the spec's optional
@@ -21,11 +26,12 @@ from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 
 from qr.backtest.account import Account, AccountState, Trade
@@ -45,13 +51,74 @@ from qr.backtest.result import (
 from qr.backtest.strategy import Context, EventStrategy
 from qr.frames import PRICE_COLUMNS, SPLIT
 
+FloatArray = npt.NDArray[np.float64]
+
+
+def _read_only(values: FloatArray) -> FloatArray:
+    """``values`` with writing switched off, so a strategy cannot change the data by mistake."""
+    values.flags.writeable = False
+    return values
+
+
+class SessionBars(Mapping[str, Bar]):
+    """One session's bars, keyed by symbol: only symbols with a bar that day are present.
+
+    It reads straight from the engine's arrays and makes a :class:`Bar` the first time a
+    symbol is looked up, so a session of 500 symbols costs nothing for the symbols no one
+    asks about. It behaves like a read-only dict.
+    """
+
+    __slots__ = ("_built", "_has_bar", "_index", "_raw", "_row", "_symbols", "timestamp")
+
+    def __init__(
+        self,
+        raw: Mapping[str, FloatArray],
+        symbols: list[str],
+        index: Mapping[str, int],
+        has_bar: npt.NDArray[np.bool_],
+        row: int,
+        timestamp: datetime,
+    ) -> None:
+        self._raw, self._symbols, self._index = raw, symbols, index
+        self._has_bar, self._row, self.timestamp = has_bar, row, timestamp
+        self._built: dict[str, Bar] = {}
+
+    def __contains__(self, symbol: object) -> bool:
+        j = self._index.get(symbol) if isinstance(symbol, str) else None
+        return j is not None and bool(self._has_bar[self._row, j])
+
+    def __getitem__(self, symbol: str) -> Bar:
+        bar = self._built.get(symbol)
+        if bar is None:
+            if symbol not in self:
+                raise KeyError(symbol)
+            t, j = self._row, self._index[symbol]
+            bar = Bar(
+                symbol=symbol,
+                timestamp=self.timestamp,
+                open=float(self._raw["open"][t, j]),
+                high=float(self._raw["high"][t, j]),
+                low=float(self._raw["low"][t, j]),
+                close=float(self._raw["close"][t, j]),
+                volume=float(self._raw["volume"][t, j]),
+            )
+            self._built[symbol] = bar
+        return bar
+
+    def __iter__(self) -> Iterator[str]:
+        row = self._has_bar[self._row]
+        return (symbol for j, symbol in enumerate(self._symbols) if row[j])
+
+    def __len__(self) -> int:
+        return int(self._has_bar[self._row].sum())
+
 
 @dataclass(frozen=True)
 class Step:
     """What happened in one session."""
 
     timestamp: datetime
-    bars: dict[str, Bar]
+    bars: Mapping[str, Bar]
     fills: list[Fill]
     trades: list[Trade]
     actions: list[CorporateAction]
@@ -96,8 +163,15 @@ class EngineCore(ABC):
         """Signed shares held in ``symbol``."""
 
     @abstractmethod
-    def history(self, symbol: str, n: int, field: str, adjusted: bool) -> pd.Series:
-        """The last ``n`` values of a bar field up to the current session, never beyond."""
+    def history(self, symbol: str, n: int, field: str, adjusted: bool) -> FloatArray:
+        """The last ``n`` values of a bar field up to the current session, never beyond.
+
+        A read-only array, oldest first.
+        """
+
+    @abstractmethod
+    def history_index(self, symbol: str, n: int) -> pd.DatetimeIndex:
+        """The dates of the values :meth:`history` returns for the same ``symbol`` and ``n``."""
 
     @abstractmethod
     def target_quantity(self, symbol: str, weight: float) -> float | None:
@@ -142,6 +216,9 @@ class PythonCore(EngineCore):
         self._first = int(data.dates.searchsorted(self._sessions[0]))
         self._rebalance = rebalance_mask(self._sessions, config.rebalance)
         self._index = {s: j for j, s in enumerate(self.symbols)}
+        # The engine's dates stay a DatetimeIndex (int64 underneath); the datetime objects
+        # the account and the strategy see are made once here, not on every step.
+        self._timestamps: list[datetime] = list(self._sessions.to_pydatetime())
 
         self._raw = {c: data.panel(c) for c in (*PRICE_COLUMNS, "volume")}
         self._adjusted = {c: data.panel(c, adjusted=True) for c in PRICE_COLUMNS}
@@ -190,7 +267,7 @@ class PythonCore(EngineCore):
             return None
         self._k += 1
         self._t = t = self._first + self._k
-        now = self._sessions[self._k].to_pydatetime()
+        now = self._timestamps[self._k]
 
         actions = self._actions.get(t, [])
         for action in actions:
@@ -200,19 +277,7 @@ class PythonCore(EngineCore):
             else:
                 self._account.apply_dividend(action.symbol, action.value)
 
-        bars = {
-            symbol: Bar(
-                symbol=symbol,
-                timestamp=now,
-                open=float(self._raw["open"][t, j]),
-                high=float(self._raw["high"][t, j]),
-                low=float(self._raw["low"][t, j]),
-                close=float(self._raw["close"][t, j]),
-                volume=float(self._raw["volume"][t, j]),
-            )
-            for j, symbol in enumerate(self.symbols)
-            if self._has_bar[t, j]
-        }
+        bars = SessionBars(self._raw, self.symbols, self._index, self._has_bar, t, now)
         adv = {o.symbol: float(self._adv[t, self._index[o.symbol]]) for o in self.open_orders()}
         done = self._broker.run_session(bars, adv, now)
 
@@ -237,7 +302,7 @@ class PythonCore(EngineCore):
 
     @property
     def now(self) -> datetime:
-        return self._sessions[max(self._k, 0)].to_pydatetime()
+        return self._timestamps[max(self._k, 0)]
 
     @property
     def cash(self) -> float:
@@ -262,29 +327,42 @@ class PythonCore(EngineCore):
             raise KeyError(f"{symbol} is not in the backtest's universe")
         return self._index[symbol]
 
-    def history(
-        self, symbol: str, n: int, field: str = "close", adjusted: bool = True
-    ) -> pd.Series:
-        if field not in self._raw:
-            raise ValueError(f"unknown bar field: {field!r}")
+    def _window(self, symbol: str, n: int) -> tuple[int, npt.NDArray[np.intp], slice | None]:
+        """Column, rows, and (without gaps) the slice of the last ``n`` bars of ``symbol``.
+
+        Only the symbol's bars at or before the current session are ever touched.
+        """
         j = self._column(symbol)
         rows = self._rows[j]
-        # Only the symbol's bars at or before the current session are ever touched.
         seen = int(np.searchsorted(rows, self._t, side="right"))
         own = rows[max(0, seen - max(n, 0)) : seen]
+        # Without gaps the window is a plain slice: a view, which costs no copy.
+        span = slice(own[0], own[-1] + 1) if len(own) and self._gapless[j] else None
+        return j, own, span
+
+    def history(
+        self, symbol: str, n: int, field: str = "close", adjusted: bool = True
+    ) -> FloatArray:
+        if field not in self._raw:
+            raise ValueError(f"unknown bar field: {field!r}")
+        j, own, span = self._window(symbol, n)
         if len(own) == 0:
-            return pd.Series([], index=self._dates[:0], name=symbol, dtype="float64")
-        pick: slice | np.ndarray = slice(own[0], own[-1] + 1) if self._gapless[j] else own
+            return _read_only(np.empty(0))
+        pick = own if span is None else span
         if field == "volume" or not adjusted:
-            values = self._raw[field][pick, j].copy()
-        else:
-            # The stored adjusted series is anchored at the end of the data. Rescaling it
-            # so the latest visible close is the traded one removes every action after
-            # the current session: this is the series as it was known today.
-            last = own[-1]
-            anchor = self._raw["close"][last, j] / self._adjusted["close"][last, j]
-            values = self._adjusted[field][pick, j] * anchor
-        return pd.Series(values, index=self._dates[pick], name=symbol)
+            # A view of the stored bars when the window has no gaps, a copy when it has.
+            return _read_only(self._raw[field][pick, j])
+        # The stored adjusted series is anchored at the end of the data. Rescaling it so
+        # the latest visible close is the traded one removes every action after the
+        # current session: this is the series as it was known today. The rescaling makes
+        # a new (small) array, so adjusted history is never a view.
+        last = own[-1]
+        anchor = self._raw["close"][last, j] / self._adjusted["close"][last, j]
+        return _read_only(self._adjusted[field][pick, j] * anchor)
+
+    def history_index(self, symbol: str, n: int) -> pd.DatetimeIndex:
+        _, own, span = self._window(symbol, n)
+        return self._dates[own if span is None else span]
 
     def _last_close(self, symbol: str) -> float | None:
         j = self._column(symbol)
