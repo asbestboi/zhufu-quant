@@ -480,9 +480,18 @@ CLEAR = "\x1b[2J"
 ALT_ON, ALT_OFF = "\x1b[?1049h", "\x1b[?1049l"
 
 
-def terminal() -> tuple[Console, io.StringIO]:
+def terminal(legacy_windows: bool = False) -> tuple[Console, io.StringIO]:
+    """A console that behaves like a modern terminal (VT codes, as on Linux, macOS, and
+    Windows Terminal), or like the old Windows console with ``legacy_windows=True``."""
     out = io.StringIO()
-    return Console(file=out, width=100, force_terminal=True, color_system=None), out
+    console = Console(
+        file=out,
+        width=100,
+        force_terminal=True,
+        color_system=None,
+        legacy_windows=legacy_windows,
+    )
+    return console, out
 
 
 def test_every_screen_starts_clean_with_a_breadcrumb(project: Path) -> None:
@@ -536,3 +545,13 @@ def test_no_screen_control_outside_a_terminal(monkeypatch: pytest.MonkeyPatch) -
     out = io.StringIO()
     tui.run(no_banner=True, console=Console(file=out, width=100))
     assert "\x1b[" not in out.getvalue()
+
+
+def test_an_old_windows_console_gets_the_menu_without_the_alternate_screen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    console, out = terminal(legacy_windows=True)
+    monkeypatch.setattr(menu, "QuestionaryPrompter", lambda: Scripted(["Data", BACK, QUIT]))
+    tui.run(no_banner=True, console=console)
+    assert ALT_ON not in out.getvalue() and ALT_OFF not in out.getvalue()
+    assert out.getvalue().count(CLEAR) == 3  # screens are still redrawn
