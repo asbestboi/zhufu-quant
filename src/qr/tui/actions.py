@@ -69,7 +69,8 @@ def _common(**kwargs: Any) -> dict[str, Any]:
 
 
 def ingest(scope: Scope) -> Invocation:
-    return Invocation(("ingest", *scope.argv()), "ingest", _common(**scope.kwargs()))
+    kwargs = _common(**scope.kwargs(), backfill=False)
+    return Invocation(("ingest", *scope.argv()), "ingest", kwargs)
 
 
 def validate(scope: Scope) -> Invocation:

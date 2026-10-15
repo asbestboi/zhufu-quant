@@ -3,6 +3,11 @@
 For every instrument: work out the date window, fetch, snapshot the raw response, record
 provider revisions, upsert, and log the outcome. One symbol failing never stops the run.
 
+``backfill=True`` instead fetches the history a symbol is missing *before* its first
+stored bar, for symbols whose configured start date (see
+:meth:`UniverseConfig.start_date_for`) has moved earlier than what was stored. It goes
+through the same snapshot, revision, and upsert steps as a normal run.
+
 A provider that is down is a different matter: retrying every symbol against it would
 take half a minute each. So each source gets a connectivity probe before the run and a
 circuit breaker during it (see ``run_ingest``).
@@ -15,7 +20,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -90,6 +95,27 @@ def fetch_window(
     return max(start_date, calendars.sessions_back(asset_class, last_stored, OVERLAP_SESSIONS)), end
 
 
+def backfill_window(
+    first_stored: date | None, asset_class: str, start_date: date
+) -> tuple[date, date] | None:
+    """The inclusive ``(start, end)`` range a backfill requests, or None if none is needed.
+
+    Needed when the stored history starts after the first session on or after
+    ``start_date``. The range runs up to
+    ``OVERLAP_SESSIONS`` sessions into the stored history, so revisions to the oldest
+    stored bars are caught too. Nothing stored yet is a job for a normal run.
+    """
+    if first_stored is None or first_stored <= start_date:
+        return None
+    # Stored from the first session on or after the start (Jan 1 is never one): complete.
+    expected = calendars.sessions(asset_class, start_date, first_stored)
+    if len(expected) and first_stored <= expected[0].date():
+        return None
+    ahead = calendars.sessions(asset_class, first_stored, first_stored + timedelta(days=21))
+    end = ahead[min(OVERLAP_SESSIONS, len(ahead)) - 1].date() if len(ahead) else first_stored
+    return start_date, end
+
+
 def detect_revisions(
     symbol: str,
     stored_bars: pd.DataFrame,
@@ -134,11 +160,21 @@ def _ingest_symbol(
     config: UniverseConfig,
     raw_root: Path,
     now: datetime,
+    backfill: bool = False,
 ) -> SymbolResult:
     """Fetch, snapshot, and store one symbol. Raises on failure."""
     symbol = instrument.symbol
+    start_date = config.start_date_for(symbol)
     last_stored = storage.last_bar_date(con, symbol)
-    start, end = fetch_window(last_stored, instrument.asset_class, config.start_date, now)
+    first_stored = storage.first_bar_date(con, symbol)
+    if backfill:
+        window = backfill_window(first_stored, instrument.asset_class, start_date)
+        if window is None:
+            reason = "nothing stored yet" if first_stored is None else f"starts {first_stored}"
+            return SymbolResult(symbol, OK, 0, f"no backfill needed ({reason})")
+        start, end = window
+    else:
+        start, end = fetch_window(last_stored, instrument.asset_class, start_date, now)
     if start > end:
         return SymbolResult(symbol, OK, 0, f"nothing to fetch ({start} is after {end})")
 
@@ -171,9 +207,10 @@ def _ingest_symbol(
     if bars.empty:
         raise SourceError(f"{source.name} returned no usable rows for {symbol}")
 
-    # On the first run we cannot know when the symbol started trading, so coverage is
-    # only checked from the first bar the provider actually returned.
-    covered_from = start if last_stored is not None else pd.Timestamp(bars["date"].min()).date()
+    # On the first run (and when backfilling) we cannot know when the symbol started
+    # trading, so coverage is only checked from the first bar the provider returned.
+    returned_from = pd.Timestamp(bars["date"].min()).date()
+    covered_from = start if last_stored is not None and not backfill else returned_from
     expected = calendars.sessions(instrument.asset_class, covered_from, end)
     missing = expected[~expected.isin(bars["date"])]
     if len(missing):
@@ -198,6 +235,12 @@ def _ingest_symbol(
 
     if problems:
         return SymbolResult(symbol, PARTIAL, written, "; ".join(problems))
+    if backfill and first_stored is not None and returned_from >= first_stored:
+        return SymbolResult(
+            symbol, OK, written, f"no earlier history at {source.name} (starts {first_stored})"
+        )
+    if backfill:
+        return SymbolResult(symbol, OK, written, f"backfilled {returned_from} to {end}")
     return SymbolResult(symbol, OK, written, f"{start} to {end}")
 
 
@@ -208,8 +251,12 @@ def run_ingest(
     sources: Mapping[str, DataSource] | None = None,
     clock: Callable[[], datetime] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    backfill: bool = False,
 ) -> IngestReport:
     """Incrementally download the universe (or just ``symbols``) into the local store.
+
+    With ``backfill`` only missing earlier history is fetched (see the module docstring);
+    symbols that need none are reported ``ok`` without a request.
 
     ``sources`` overrides the providers built from the config (used by tests), ``clock``
     supplies naive-UTC "now" (default: ``storage.utcnow``). Quality checks run afterwards
@@ -298,7 +345,9 @@ def run_ingest(
                 try:
                     if name not in built:
                         built[name] = build_source(name, config)
-                    result = _ingest_symbol(con, instrument, built[name], config, raw_root, started)
+                    result = _ingest_symbol(
+                        con, instrument, built[name], config, raw_root, started, backfill
+                    )
                 except SourceError as exc:
                     download_failed = True
                     result = SymbolResult(symbol, FAILED, 0, f"{type(exc).__name__}: {exc}")
