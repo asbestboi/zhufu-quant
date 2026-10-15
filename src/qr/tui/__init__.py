@@ -17,11 +17,18 @@ def is_interactive() -> bool:
 
 
 def run(no_banner: bool = False, console: Console | None = None) -> None:
-    """Show the banner (unless turned off) and the main menu, until Quit or Ctrl+C."""
-    from qr.tui.banner import banner_disabled, print_banner
+    """The main menu, with the logo on top unless turned off, until Quit or Ctrl+C.
+
+    In a terminal the menu uses the alternate screen (like vim or less): each screen
+    replaces the last one, and on exit the terminal shows exactly what it showed before.
+    """
+    from qr.tui.banner import banner_disabled
     from qr.tui.menu import Menu, QuestionaryPrompter
 
     console = console or Console()
-    if not banner_disabled(no_banner):
-        print_banner(console)
-    Menu(QuestionaryPrompter(), console).run()
+    alternate = console.is_terminal and console.set_alt_screen(True)
+    try:
+        Menu(QuestionaryPrompter(), console, banner=not banner_disabled(no_banner)).run()
+    finally:
+        if alternate:
+            console.set_alt_screen(False)
