@@ -425,6 +425,21 @@ Weights are fractions of equity: 0.5 is half the account, negative is short, NaN
 position. Use ratios of prices, never price levels: adjusted levels shift whenever a later
 dividend is paid, ratios do not.
 
+#### Strategies in another package
+
+`register` only helps if the module that calls it is imported. For strategies that live
+in your own package (a private research repo, say), declare an entry point in its
+`pyproject.toml` and install it into the same environment:
+
+```toml
+[project.entry-points."qr.strategies"]
+mine = "my_package.strategies:register_all"   # a function that calls register(...)
+```
+
+The first time a config names a strategy `qr` does not know, it loads every
+`qr.strategies` entry point (a module is imported; a callable is also called) and looks
+again. A plugin that fails to load stops the run with its name and the error.
+
 ### Writing a strategy for the event-driven engine
 
 Override the hooks you need. Anything submitted in `on_bar` is executed on the next
