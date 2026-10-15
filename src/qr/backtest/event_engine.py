@@ -444,7 +444,7 @@ def run_event(
 
         core_factory = select_core(config)
     core = core_factory(data, config, costs)
-    ctx = Context(core)
+    ctx = Context(core, strategy.warmup_bars)
     dates: list[datetime] = []
     account_rows: list[list[float]] = []
     position_rows: list[dict[str, float]] = []

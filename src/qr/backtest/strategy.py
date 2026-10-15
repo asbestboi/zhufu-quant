@@ -64,7 +64,13 @@ class WeightStrategy(ABC):
     """A strategy for the vectorized engine: a table of target weights.
 
     Constructor keyword arguments are the config's ``params``.
+
+    ``warmup_bars`` is how many bars of a symbol the signal needs, the current one
+    included (a 200-day average needs 200). Until a symbol has that many, the engine
+    drops its weight, whatever the strategy returned; 0 means from its first bar.
     """
+
+    warmup_bars: int = 0
 
     @abstractmethod
     def target_weights(self, bars: pd.DataFrame) -> pd.DataFrame:
@@ -88,8 +94,9 @@ class Context:
     Reads are limited to the past; orders are executed on the next bar at the earliest.
     """
 
-    def __init__(self, core: EngineCore) -> None:
+    def __init__(self, core: EngineCore, warmup_bars: int = 0) -> None:
         self._core = core
+        self._warmup_bars = warmup_bars
 
     # reads
 
@@ -176,8 +183,20 @@ class Context:
         (next open) or a market-on-close order (next close). Returns None when the
         quantity rounds to zero shares.
         """
+        if not self.warmed_up(symbol) and self._opens(symbol, quantity):
+            return None
         side = BUY if quantity > 0 else SELL
         return self._core.submit(symbol, side, abs(quantity), type, limit_price, tif)
+
+    def warmed_up(self, symbol: str) -> bool:
+        """Whether ``symbol`` has the strategy's ``warmup_bars`` bars, today's included."""
+        n = self._warmup_bars
+        return n <= 0 or len(self._core.history(symbol, n, "close", False)) >= n
+
+    def _opens(self, symbol: str, quantity: float) -> bool:
+        """Whether an order of ``quantity`` would grow the position or open a new one."""
+        held = self._core.position(symbol)
+        return held == 0 or (held > 0) == (quantity > 0)
 
     def order_limit(
         self, symbol: str, quantity: float, limit_price: float, tif: TimeInForce = "gtc"
@@ -214,8 +233,12 @@ class Context:
 class EventStrategy:
     """A strategy for the event-driven engine. Override the hooks you need.
 
-    Constructor keyword arguments are the config's ``params``.
+    Constructor keyword arguments are the config's ``params``. ``warmup_bars`` works as
+    for :class:`WeightStrategy`: orders that would open or grow a position in a symbol
+    with fewer bars are dropped (``Context.order`` returns None); reducing one is not.
     """
+
+    warmup_bars: int = 0
 
     def on_start(self, ctx: Context) -> None:
         """Called once before the first bar."""
