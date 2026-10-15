@@ -115,6 +115,13 @@ actions ask first (ingesting every symbol; a cross-check that would use many of 
 roughly 50 free requests an hour). Every list has a Back entry, and Ctrl+C goes back one
 level, or quits from the main menu.
 
+Each screen replaces the last one: the menu clears the terminal and redraws the logo, a
+breadcrumb (`Main menu › Data`), and the list, so old questions and output do not pile up.
+A command's output stays on screen until you press a key. The menu runs on the terminal's
+alternate screen, like `vim` or `less`, so when you quit, your terminal looks exactly as it
+did before. To keep a command's output in your scrollback, run the printed `qr …` command
+directly.
+
 The logo only appears in the menu. Turn it off with `qr menu --no-banner` or
 `QR_NO_BANNER=1`; `NO_COLOR=1` turns off colours. **Every command still works directly**,
 and `qr` alone never waits for input outside a terminal: in a pipe, a scheduled task, or
