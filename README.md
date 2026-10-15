@@ -72,9 +72,12 @@ Your own strategy configs and notebooks can go in `configs/private/` and
 | `qr status [--universe NAME]` | Per-symbol coverage: first/last date, row count, open errors and warnings. |
 | `qr crosscheck [--symbols X,Y \| --universe NAME] [--days 365]` | Compare stored closes and splits with a second source (Tiingo). See [Cross-checking](#cross-checking-against-a-second-source). |
 | `qr export SYMBOL --out f.csv [--adjustment none\|split\|total_return]` | Dump bars to CSV (total-return adjusted by default). |
+| `qr snapshots backfill` | Hash raw snapshot files written before the snapshot manifest existed and add them to it. Files already listed are skipped, so it is safe to repeat. |
 | `qr backtest run CONFIG.yaml [--notes TEXT] [--reports-dir DIR] [--engine vectorized\|event] [--engine-core python\|rust]` | Run a backtest, write its HTML tearsheet, log it to the registry. `--engine` and `--engine-core` override the config for this run. Exits non-zero (and logs the run as failed) if it could not run. |
 | `qr backtest list [--strategy NAME] [--limit 20]` | Recent runs from the registry. |
 | `qr backtest compare RUN_ID RUN_ID ...` | Side-by-side metrics of logged runs; unique id prefixes are enough. |
+| `qr backtest show RUN_ID` | One run in full: the resolved config (every default filled in), its provenance (data hash, per-symbol hashes, environment), and its metrics. |
+| `qr backtest verify RUN_ID` | Recompute the run's data hash and say **match** or **data changed** (naming the symbols that differ). Exits 1 when the data changed or the run has no hash. See [Data hashes and provenance](#data-hashes-and-provenance). |
 
 Add `-v` before the command for debug logs: `qr -v ingest`. `--universe` takes the name
 of a group from the config's `groups:` section; using it together with `--symbols` is an
@@ -188,6 +191,14 @@ change the time. Pick a time after the US close (16:00 New York): 23:30 suits Eu
 data through it). Besides the functions below it has `get_corporate_actions(symbols,
 end=None)` (splits and dividends as a table), `get_asset_classes(symbols)`, and
 `data_version(symbols, end=None)` (when the newest of those bars was last written).
+
+`fingerprint(symbols, start=None, end=None, adjustment="total_return", as_of=None)`
+returns a `DataFingerprint`: a SHA-256 `hash` over exactly the unadjusted bars and
+corporate actions `get_bars` would read with the same arguments, a hash `per_symbol`,
+the number of bar `rows`, `first_date`, `last_date`, and `latest_ingested_at`. Corporate
+actions count from `start` to each symbol's last bar (earlier ones cannot change those
+bars). The hash does not depend on symbol order, row order, the DataFrame index, or the
+platform; the canonical byte format is described in `qr/fingerprint.py`.
 
 ```python
 from datetime import date, datetime
@@ -561,16 +572,53 @@ which needs the registry below.
 Each run writes one self-contained HTML file (charts are inline SVG; nothing is loaded
 from the network): equity against the benchmark on a log scale, drawdowns, a monthly
 returns heatmap, rolling Sharpe and volatility, exposure, the before/after cost
-comparison, the metrics table, the config, and the run's metadata.
+comparison, the metrics table, the run's metadata, its **Provenance** (below), and the
+config.
 
 ### The experiment registry
 
 Every `qr backtest run` is logged to `data/backtests.duckdb`: run id, time, strategy,
 engine, the full config and its hash, git commit and whether the tree was dirty, the
 version of the data read, the period, Sharpe, CAGR, maximum drawdown, turnover, the
-report path, and notes. **Failed runs are logged too**, with status `failed` and the
-error as notes. Do not delete rows for ideas that did not work: the number of things
-tried is exactly what an honest significance test needs.
+report path, notes, and the provenance columns below. **Failed runs are logged too**,
+with status `failed` and the error as notes. Do not delete rows for ideas that did not
+work: the number of things tried is exactly what an honest significance test needs.
+
+New columns are added to an existing registry by `ALTER TABLE ... ADD COLUMN` on the next
+run; older rows keep empty values there and still list, show, and compare.
+
+### Data hashes and provenance
+
+Every run records which data and which environment produced it, in the registry, in
+`qr backtest show`, and in the tearsheet's **Provenance** section:
+
+| Column | Meaning |
+| --- | --- |
+| `data_hash` | SHA-256 of everything the run read (see `fingerprint` under [Loading data](#loading-data-in-python)): the universe's symbols and the benchmark, full history up to the config's `end` (warm-up bars before `start` included), total-return adjustment. |
+| `data_per_symbol_json` | The same, one hash per symbol, so a change can be traced to a symbol. |
+| `data_rows` | Number of bars hashed. |
+| `data_as_of` | The `as_of` the data was read with. Empty means "the store as it was when the run started", which is what every backtest uses today. |
+| `python_version`, `os` | Interpreter and operating system. |
+| `uv_lock_sha256` | Hash of `uv.lock`, which pins every package version. |
+| `engine_core`, `rust_core_version` | The event-engine core that actually ran (after any fallback to Python), and the `qr_core` version when Rust ran. Empty for the vectorized engine. |
+| `git_commit`, `git_dirty` | As before. |
+
+`qr backtest verify RUN_ID` recomputes the hash for the run's symbols and end date with
+its `as_of`. **match** means a rerun today reads exactly the same bars and corporate
+actions. **data changed** lists the symbols whose data differs: usually a provider
+revision picked up by a later ingest (see the `revision` findings in `qr validate`), or a
+symbol removed from the store. Data outside the run (other symbols, bars after its end)
+does not affect the result.
+
+Every raw snapshot file also gets a row in the `snapshot_manifest` table of
+`market.duckdb` when it is written (`path` relative to `data/raw`, `source`, `symbol`,
+`kind` = `bars` or `actions`, `fetched_at`, `rows`, `sha256`). Run
+`qr snapshots backfill` once to add the files downloaded before the manifest existed.
+The manifest is what lets a later check notice a snapshot file that was changed or
+damaged after it was written.
+
+Limits: verify says *which symbols* changed, not which dates; the original values live
+on only in the raw snapshots. Runs logged before hashes existed cannot be verified.
 
 ## Research studies
 
@@ -628,8 +676,9 @@ sources/tiingo  ->  crosscheck --+   (writes findings only, never bars)
   is tested again: if the test fails too it is declared down and its remaining symbols
   are skipped; if the test succeeds, the failures were about those tickers and the run
   carries on.
-- **Storage** (`qr/storage.py`). Five tables: `instruments`, `daily_bars` (unadjusted),
-  `corporate_actions`, `ingestion_log`, `quality_issues`. Upserts only touch rows whose
+- **Storage** (`qr/storage.py`). Six tables: `instruments`, `daily_bars` (unadjusted),
+  `corporate_actions`, `ingestion_log`, `quality_issues`, and `snapshot_manifest` (the
+  SHA-256 of every raw snapshot file). Upserts only touch rows whose
   values changed, so re-running is a no-op and `ingested_at` means "when this value last
   changed".
 - **Validation** (`qr/validate.py`). Findings go to `quality_issues`:
@@ -872,6 +921,37 @@ pass than real trading.
 - **Hit rate and holding period come from the spread position** (the vectorized engine
   does not track cost basis): a trade's return is the account's change from the close
   before it was opened to the close of the day it was closed, costs included.
+
+### Research discipline: data hashes (part 1)
+
+- **The hash covers unadjusted data, not adjusted prices.** Adjusted prices are a
+  deterministic function of the unadjusted bars and the corporate actions, and both
+  engines read those. The adjustment mode is folded into the combined hash only, so the
+  per-symbol hashes describe the stored data alone.
+- **A run's hash covers everything it could have read**: full history up to `end`
+  (strategies warm up on bars before `start`) and the benchmark. A narrower hash would
+  miss a revision in warm-up data that still changes the signals.
+- **NaN and -0.0 are canonicalised** before hashing (a flag byte per value, NaN written
+  as 0.0, -0.0 as 0.0), so different NaN bit patterns or signed zeros cannot make equal
+  data look different, while a missing value never equals zero.
+- **Runs record `as_of` as empty, meaning the live store.** Backtest configs have no
+  `as_of` option, and adding one would be out of this spec's scope. Verify therefore
+  compares against the store today, which is exactly how a later provider revision shows
+  up as "data changed". The column is there for when point-in-time backtests exist.
+- **The fingerprint is taken before the simulation**, inside the same error handling, so
+  a run that crashes in the strategy still records which data it was given.
+  `run_backtest` (the notebook entry point) does not log anything and so records no
+  provenance; only `execute` (`qr backtest run`) does.
+- **`verify` exits 1 when the data changed**, so a script can stop on it.
+- **Manifest rows are never rewritten.** The first hash recorded for a file is the one to
+  compare against; `backfill` skips files already listed instead of re-hashing them.
+  Paths are stored relative to `data/raw` with `/` separators, so the manifest survives
+  moving the data folder or switching operating systems. Crypto directories (`BTC-USD`)
+  are mapped back to their symbol (`BTC/USD`) through the instruments table.
+- **`uv.lock` is hashed from the checkout `qr` is imported from**, not the current
+  directory, so it describes the code that actually ran.
+- **One existing test was edited**: `test_init_schema_is_repeatable` lists every table by
+  name, so it now includes `snapshot_manifest`. Nothing else about it changed.
 
 ## Rust core
 
