@@ -1,0 +1,33 @@
+[package]
+name = "qr_core"
+version = "0.1.0"
+edition = "2024"
+description = "Rust core of the zhufu-quant event-driven backtest engine (Python module qr_core)"
+license = "MIT"
+publish = false
+
+[lib]
+name = "qr_core"
+# cdylib: the shared library Python imports. rlib: a normal Rust library, so that
+# `cargo test` can link the integration tests in tests/ against it.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+numpy = "0.29"
+pyo3 = "0.29"
+
+[lints.rust]
+# `unsafe` is only allowed where a comment explains why it is sound (two places in lib.rs).
+unsafe_code = "deny"
+
+[lints.clippy]
+# No `unwrap()` on anything that can fail at runtime: return errors instead.
+unwrap_used = "deny"
+# `!(x > 0.0)` is deliberate: it is true for NaN, exactly like Python's `not x > 0`,
+# which the core must copy. Rewriting it as `x <= 0.0` would change the result for NaN.
+neg_cmp_op_on_partial_ord = "allow"
+
+[profile.release]
+# Slower to compile, a little faster to run: one code unit, optimized across crates.
+lto = true
+codegen-units = 1
