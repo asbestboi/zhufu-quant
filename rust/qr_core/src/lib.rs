@@ -3,6 +3,7 @@
 //! Work in progress: the Python bindings come last.
 
 pub mod account;
+pub mod broker;
 pub mod costs;
 pub mod error;
 pub mod numeric;
