@@ -67,7 +67,7 @@ Your own strategy configs and notebooks can go in `configs/private/` and
 | --- | --- |
 | `qr` / `qr menu [--no-banner]` | The interactive menu (see below). In a script, `qr` alone prints this help. |
 | `qr init` | Create the database and tables. Safe to repeat. |
-| `qr ingest [--symbols X,Y \| --universe NAME]` | Incremental download, then quality checks. Exits non-zero if any symbol failed or came back incomplete, or a source was unreachable. |
+| `qr ingest [--symbols X,Y \| --universe NAME] [--backfill]` | Incremental download, then quality checks. Exits non-zero if any symbol failed or came back incomplete, or a source was unreachable. `--backfill` instead fetches history missing before each symbol's first stored bar (see [Per-group start dates](#per-group-start-dates-and-backfill)). |
 | `qr validate [--symbols X,Y \| --universe NAME]` | Re-run the quality checks and print a summary of open findings. Exits non-zero if any finding has severity `error`. |
 | `qr status [--universe NAME]` | Per-symbol coverage: first/last date, row count, open errors and warnings. |
 | `qr crosscheck [--symbols X,Y \| --universe NAME] [--days 365]` | Compare stored closes and splits with a second source (Tiingo). See [Cross-checking](#cross-checking-against-a-second-source). |
@@ -313,9 +313,36 @@ from qr.load import get_bars
 bars = get_bars(universe_symbols("pairs"))
 ```
 
-The default config defines `core` (SPY, QQQ, IWM, TLT, GLD, AAPL, MSFT) and `pairs` (KO,
-PEP, XOM, CVX, V, MA, HD, LOW, GS, MS). A plain `qr ingest` downloads everything in
-`universe:` whether or not it belongs to a group.
+The default config defines `core` (SPY, QQQ, IWM, TLT, GLD, AAPL, MSFT), `pairs` (KO,
+PEP, XOM, CVX, V, MA, HD, LOW, GS, MS), and `etf` (twelve cross-asset ETFs from 2003, see
+below). A plain `qr ingest` downloads everything in `universe:` whether or not it belongs
+to a group.
+
+### Per-group start dates and backfill
+
+A study can need more history than the global `start_date`. Write the group as a mapping
+to give its symbols their own start:
+
+```yaml
+groups:
+  etf:
+    start_date: 2003-01-01
+    symbols: [SPY, IWM, EFA, EEM, VNQ, TLT, IEF, LQD, TIP, GLD, DBC, SHY]
+```
+
+A symbol's start is the earliest `start_date` of the groups that list it, or the global
+one if none does. So SPY, which is also in `core`, now starts in 2003.
+
+New symbols are fetched from their start on the first `qr ingest`. Symbols that were
+already stored from a later date need `qr ingest --backfill`: for each one whose stored
+history begins after the first session on or after its start, it requests the missing
+earlier range plus five stored sessions (so revisions to the oldest bars are caught),
+and goes through the usual snapshot, revision, and upsert steps. A symbol that listed
+after its start date is reported as "no earlier history" and nothing is written.
+
+```
+uv run qr ingest --universe etf --backfill
+```
 
 ## Cross-checking against a second source
 
@@ -395,6 +422,10 @@ tearsheet to `reports/` (gitignored), and adds a row to the registry.
 - **Rolling helpers are past-only**: `sma`, `past_return`, `rolling_volatility`, and
   `zscore` in `qr.backtest.strategy` need a full window and never center it.
 - **No symbol is traded before its first bar**, whatever weight a strategy gives it.
+- **Nor before its warm-up**: a strategy can set `warmup_bars` (for example
+  `self.warmup_bars = 253` for a 252-day return). Both engines then drop a symbol's
+  weight, or orders that would open or grow a position in it, until it has that many
+  bars. A fund that lists mid-backtest joins once its signal can be computed.
 
 ### Writing a strategy for the vectorized engine
 
@@ -661,7 +692,8 @@ sources/ (yahoo, crypto)  ->  ingest  ->  data/raw/{source}/{symbol}/{timestamp}
 sources/tiingo  ->  crosscheck --+   (writes findings only, never bars)
 ```
 
-- **Ingestion** (`qr/ingest.py`). First run fetches from `start_date`; later runs re-fetch
+- **Ingestion** (`qr/ingest.py`). First run fetches from the symbol's start date (its
+  group's `start_date`, else the global one); later runs re-fetch
   from five trading sessions before the last stored bar to catch late corrections. Each
   download is written to a raw Parquet snapshot before anything else happens. If an
   overlapping value differs from what is stored by more than `revision_tolerance`, a
