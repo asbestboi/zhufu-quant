@@ -16,6 +16,9 @@ from qr.backtest.strategy import Context, EventStrategy
 
 from .bt_helpers import FIVE_DAYS, bars, flat_bars, make_config, run
 
+# Every test here runs on both event-engine cores (see the engine_core fixture).
+pytestmark = pytest.mark.usefixtures("engine_core")
+
 Action = Callable[[Context], Any]
 
 

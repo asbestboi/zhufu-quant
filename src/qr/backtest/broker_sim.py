@@ -117,7 +117,7 @@ class SimBroker:
         Leaves the account marked at the session's close.
         """
         done: list[tuple[Fill, Trade]] = []
-        self.account.mark({s: b.open for s, b in bars.items()}, now)
+        self.account.mark(self._prices(bars, "open"), now)
         waiting = [o for o in self.account.open_orders.values() if o.symbol in bars]
 
         def sells_first(type: OrderType) -> list[Order]:
@@ -139,10 +139,18 @@ class SimBroker:
                 self._execute(order, limit, True, adv_value, now, done)
             elif order.tif == "day":
                 self._close(order, "expired")
-        self.account.mark({s: b.close for s, b in bars.items()}, now)
+        self.account.mark(self._prices(bars, "close"), now)
         for order in sells_first("moc"):
             self._execute(order, bars[order.symbol].close, False, adv_value, now, done)
         return done
+
+    def _prices(self, bars: Mapping[str, Bar], field: str) -> dict[str, float]:
+        """Today's ``open`` or ``close`` of the symbols held: all marking needs.
+
+        Only held symbols are looked up, so a session's other bars are never built.
+        """
+        held = (s for s in self.account.positions if s in bars)
+        return {s: getattr(bars[s], field) for s in held}
 
     def _order_costs(
         self, order: Order, quantity: float, price: float, adv: float, passive: bool

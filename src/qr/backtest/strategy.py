@@ -9,9 +9,12 @@ a :class:`Context` whose ``history`` stops at the current bar.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+import numpy as np
+import numpy.typing as npt
 import pandas as pd
 
 from qr.backtest.account import AccountState, Trade
@@ -126,15 +129,32 @@ class Context:
 
     def history(
         self, symbol: str, n: int, field: str = "close", adjusted: bool = True
-    ) -> pd.Series:
+    ) -> npt.NDArray[np.float64]:
         """The last ``n`` values of ``field`` for ``symbol``, up to and including today.
 
-        Shorter when the symbol has fewer bars. With ``adjusted=True`` (default) prices
-        are split- and dividend-adjusted using only actions that have already happened,
-        so today's value is the traded price and a moving average is not broken by a
-        split. Volume is always as traded.
+        A read-only NumPy array, oldest first; shorter when the symbol has fewer bars.
+        With ``adjusted=True`` (default) prices are split- and dividend-adjusted using
+        only actions that have already happened, so today's value is the traded price and
+        a moving average is not broken by a split. Volume is always as traded.
+
+        Unadjusted fields and volume are views of the engine's data, adjusted prices a
+        small new array; neither may be written to. Use :meth:`history_df` for a pandas
+        Series with dates.
         """
         return self._core.history(symbol, n, field, adjusted)
+
+    def history_df(
+        self, symbol: str, n: int, field: str = "close", adjusted: bool = True
+    ) -> pd.Series:
+        """Like :meth:`history`, as a pandas Series indexed by date (a copy).
+
+        Building the Series costs far more than the lookup itself (about 40 microseconds
+        a call against 6 for :meth:`history`), so prefer :meth:`history` in code that runs
+        on every bar.
+        """
+        values = self._core.history(symbol, n, field, adjusted)
+        index = self._core.history_index(symbol, n)
+        return pd.Series(np.array(values), index=index, name=symbol)
 
     def open_orders(self, symbol: str | None = None) -> list[Order]:
         """Orders waiting to be executed, optionally for one symbol."""
@@ -200,8 +220,11 @@ class EventStrategy:
     def on_start(self, ctx: Context) -> None:
         """Called once before the first bar."""
 
-    def on_bar(self, ctx: Context, bars: dict[str, Bar]) -> None:
+    def on_bar(self, ctx: Context, bars: Mapping[str, Bar]) -> None:
         """Called after each session's close with that session's bars (unadjusted).
+
+        ``bars`` is a read-only mapping from symbol to :class:`Bar` holding the symbols
+        that traded that day; a ``Bar`` is only built when a symbol is looked up.
 
         Orders submitted here are executed on the next session.
         """

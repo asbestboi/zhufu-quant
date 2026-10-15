@@ -5,6 +5,7 @@ Run from the repo root (the reference cases read ./data):
     uv run python scripts/bench/bench.py                 # every case
     uv run python scripts/bench/bench.py --case stress   # one case (e.g. under py-spy)
     uv run python scripts/bench/bench.py --json out.json # also save the numbers
+    uv run python scripts/bench/bench.py --core rust     # event engine on the Rust core
 
 Each timing is one simulation (``run_vectorized`` or ``run_event``) with costs: what
 ``run_backtest`` does twice, once with and once without costs. Loading data, building the
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import statistics
 import time
@@ -187,7 +189,13 @@ def main() -> None:
     parser.add_argument("--case", choices=list(CASES), action="append")
     parser.add_argument("--repeat", type=int, default=None, help="runs per timing")
     parser.add_argument("--json", help="also write the results to this file")
+    parser.add_argument(
+        "--core", choices=["python", "rust"], default="python", help="event-engine core"
+    )
     args = parser.parse_args()
+    # run_event picks the core from this variable; fail rather than silently fall back.
+    os.environ["QR_ENGINE_CORE"] = args.core
+    os.environ["QR_REQUIRE_RUST_CORE"] = "1" if args.core == "rust" else ""
 
     results = []
     for name in args.case or list(CASES):
@@ -207,6 +215,7 @@ def main() -> None:
             "machine": platform.machine(),
             "processor": platform.processor(),
             "system": platform.platform(),
+            "event_core": args.core,
         }
         with open(args.json, "w", encoding="utf-8") as handle:
             json.dump({"meta": meta, "results": results}, handle, indent=2)

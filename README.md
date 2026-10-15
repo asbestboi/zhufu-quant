@@ -37,7 +37,7 @@ Speed and features come after.
 | 2 | Backtesting engine (vectorized and event-driven) | Done |
 | 3 | Strategy research, starting with a pairs-trading study | Next |
 | 4 | Paper trading, then possibly live trading | Later |
-| Stretch | Rust core for the hot paths | Optional |
+| 2.5 | Faster event engine: array data path, then an optional Rust core | Done |
 
 ## Setup
 
@@ -372,6 +372,8 @@ Override the hooks you need. Anything submitted in `on_bar` is executed on the n
 session.
 
 ```python
+from collections.abc import Mapping
+
 from qr.backtest.account import Trade
 from qr.backtest.events import Bar
 from qr.backtest.strategy import Context, EventStrategy
@@ -381,24 +383,32 @@ class AboveAverageEvents(EventStrategy):
     def __init__(self, window: int = 100) -> None:
         self.window = window
 
-    def on_bar(self, ctx: Context, bars: dict[str, Bar]) -> None:
+    def on_bar(self, ctx: Context, bars: Mapping[str, Bar]) -> None:
         if not ctx.is_rebalance:  # the config's `rebalance` schedule
             return
         for symbol in ctx.symbols:
-            prices = ctx.history(symbol, self.window)  # past only, adjusted
+            prices = ctx.history(symbol, self.window)  # NumPy array: past only, adjusted
             if len(prices) < self.window:
                 continue
-            above = prices.iloc[-1] > prices.mean()
+            above = prices[-1] > prices.mean()
             ctx.order_target_weight(symbol, 1 / len(ctx.symbols) if above else 0.0)
 
     def on_fill(self, ctx: Context, trade: Trade) -> None: ...  # also on_start, on_end
 ```
 
 `Context` offers `now`, `symbols`, `cash`, `equity`, `account` (a full `AccountState`),
-`position(symbol)`, `history(symbol, n, field="close", adjusted=True)`, `is_rebalance`,
-`open_orders()`, and the order methods `order(symbol, quantity)` (signed; a market order,
+`position(symbol)`, `history(symbol, n, field="close", adjusted=True)`, `history_df(...)`,
+`is_rebalance`, `open_orders()`, and the order methods `order(symbol, quantity)` (signed; a market order,
 or market-on-close under `execution: next_close`), `order_limit(symbol, quantity, price,
 tif="gtc"|"day")`, `order_target_quantity`, `order_target_weight`, and `cancel`.
+
+`history` returns a **read-only NumPy array**, oldest value first, ending with today's bar.
+Unadjusted fields and volume are views of the engine's data (no copy); adjusted prices are
+rescaled into a small new array, because the adjustment must only use actions that have
+already happened. Writing to either raises an error. `history_df` gives the same values as
+a pandas Series indexed by date; it is several times slower, so keep it out of code that
+runs on every bar. `bars` is a read-only mapping of the symbols that traded that session;
+a `Bar` is only built when a symbol is looked up.
 
 Register both versions under one name with `register("name", vectorized=..., event=...)`
 before running, or call the engines directly:
@@ -419,6 +429,7 @@ One YAML file per experiment in `configs/backtests/`. Unknown keys are rejected.
 ```yaml
 name: sma_crossover_spy     # used in the report file name and the registry
 engine: vectorized          # vectorized | event
+engine_core: python         # event engine: python | rust (see "Rust core"; same results)
 strategy: sma_crossover     # buy_and_hold | sma_crossover | xs_momentum | pairs | your own
 params: { fast: 50, slow: 200 }
 universe: [SPY]             # a list, or the name of a group in config/universe.yaml
@@ -756,6 +767,15 @@ pass than real trading.
 - **Event-engine history is adjusted point-in-time.** `ctx.history()` rescales the stored
   adjusted series so that today's value is the traded price, which removes every
   corporate action after the current bar.
+- **Strategies get arrays, not pandas objects.** Building a pandas Series for every
+  `history()` call, a `Bar` for every symbol every session, and a `Timestamp` every step
+  took most of the event engine's time (`docs/perf/baseline.md`). `history()` now returns
+  a read-only NumPy array, session bars are built on demand, and session dates are
+  converted once per run. Adjusted history is still a small new array, not a view: a view
+  of the stored adjusted series would carry adjustments for corporate actions that have
+  not happened yet. The read-only flag stops accidental writes; a strategy that switches
+  it back on deliberately can still change the data. `history_df()` keeps the old pandas
+  form. Results are bit-for-bit the same as before.
 - **Weights on a symbol without data are dropped, not redistributed.** The engine will
   not guess how a strategy wants its weights renormalized.
 - **Runs are logged to their own database**, `data/backtests.duckdb`, not to
@@ -804,6 +824,69 @@ pass than real trading.
 - **Hit rate and holding period come from the spread position** (the vectorized engine
   does not track cost basis): a trade's return is the account's change from the close
   before it was opened to the close of the day it was closed, costs included.
+
+## Rust core
+
+The event engine can run its core in Rust: the module `qr_core`, in
+[`rust/qr_core/`](rust/qr_core/). It is optional. Nothing in `qr` needs it, the Python
+core stays the reference and the default, and both give **identical results**, bit for
+bit (`tests/test_bt_rust_core.py` checks every reference strategy and a 500-symbol market).
+
+**What is in Rust, and why.** Profiling showed the event engine's time going into pandas
+objects built for strategies, not into order matching (`docs/perf/baseline.md`). That
+was fixed in Python first. The Rust core then takes over everything between strategy
+calls:
+
+- the **bar store**: every bar in flat arrays owned by Rust. `ctx.history()` returns
+  read-only NumPy views of it without copying where it can (unadjusted prices and
+  volume), and these views cannot be made writable from Python;
+- the **event loop**, splits and dividends, **order matching**, fills, **costs**, and the
+  **account**.
+
+Strategies, configs, the vectorized engine, metrics, and reports stay in Python, and
+strategies run unchanged on either core. The Rust code is written to be read by someone
+learning Rust, with comments on ownership, borrowing, `Result`, and traits where they
+first appear; `lib.rs` lists the modules.
+
+**Building it on Arch Linux:**
+
+```
+sudo pacman -S --needed rustup base-devel   # rustup manages Rust; base-devel has the linker
+rustup default stable
+rustup component add clippy rustfmt
+uv sync                                     # maturin comes with the dev dependencies
+uv run maturin develop --release -m rust/qr_core/Cargo.toml
+```
+
+On **Windows**, install Rust with `rustup-init.exe` from [rustup.rs](https://rustup.rs)
+together with the "Desktop development with C++" workload of the Visual Studio Build Tools
+(the MSVC linker), then run the same `uv sync` and `maturin develop` commands. `uv sync`
+removes packages that are not in the lockfile, so run `maturin develop` again after it;
+`uv run` leaves the module in place.
+
+**Switching cores.** Set `engine_core: rust` in a backtest config, or override every run
+with an environment variable: `QR_ENGINE_CORE=rust uv run qr backtest run ...` (or
+`python`). If the module is not built, the Python core is used and a warning says how to
+build it; `QR_REQUIRE_RUST_CORE=1` turns that into an error. The core is left out of the
+config hash, since it does not change the result.
+
+**Checks:** `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test` in `rust/qr_core/`; `uv run pytest` runs every event-engine test on both
+cores (Rust skipped if not built). CI does all of this on Ubuntu and Windows, plus one job
+without Rust to show the Python fallback works.
+
+**Results** (`docs/perf/results.md`; one simulation, laptop i7-8650U):
+
+| Event engine | Before | Python, array data path | Rust core |
+| --- | ---: | ---: | ---: |
+| SMA crossover, 17 symbols, 13 years | 4.61 s | 1.38 s | 0.54 s |
+| Momentum, 17 symbols | 0.47 s | 0.17 s | 0.08 s |
+| Buy and hold, 17 symbols | 0.36 s | 0.37 s | 0.12 s |
+| Momentum, 500 synthetic symbols, 15 years | 10.9 s | 2.91 s | 1.97 s |
+| 200 SMA crossover runs on SPY | 79.4 s | 32.9 s | 14.4 s |
+
+Most of the gain came from the Python fix; Rust roughly doubles it again. What remains is
+mostly the strategies' own Python and NumPy code and building the result tables.
 
 ## Development
 
