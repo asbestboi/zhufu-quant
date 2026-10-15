@@ -508,7 +508,7 @@ def backtest_show(
 
     summary = Table(title=f"Run {run['run_id']}", show_header=False)
     summary.add_column("field")
-    summary.add_column("value")
+    summary.add_column("value", overflow="fold")
     status_colour = "green" if run["status"] == "ok" else "red"
     for label, value in (
         ("name", run["name"]),
@@ -535,7 +535,7 @@ def backtest_show(
     has_dirty = dirty is not None and not pd.isna(dirty)
     origin = Table(title="Provenance", show_header=False)
     origin.add_column("field")
-    origin.add_column("value")
+    origin.add_column("value", overflow="fold")
     for label, value in (
         (
             "git commit",
