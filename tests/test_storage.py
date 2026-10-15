@@ -28,6 +28,7 @@ def test_init_schema_is_repeatable(con: storage.Connection) -> None:
         "corporate_actions",
         "ingestion_log",
         "quality_issues",
+        "snapshot_manifest",
     }
 
 

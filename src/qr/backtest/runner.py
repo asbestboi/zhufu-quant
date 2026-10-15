@@ -7,6 +7,7 @@ tearsheet and logs the run to the registry, also when the run fails.
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,7 +15,7 @@ from pathlib import Path
 import pandas as pd
 
 from qr import storage
-from qr.backtest import registry
+from qr.backtest import provenance, registry
 from qr.backtest.config import BacktestConfig
 from qr.backtest.costs import CostModel
 from qr.backtest.data import MarketData, load_market_data
@@ -26,6 +27,7 @@ from qr.backtest.strategies import build_strategy
 from qr.backtest.strategy import EventStrategy, WeightStrategy
 from qr.backtest.vectorized import run_vectorized
 from qr.config import universe_symbols
+from qr.fingerprint import DataFingerprint
 from qr.load import data_version, get_bars
 
 DEFAULT_REPORTS_DIR = Path("reports")
@@ -121,6 +123,34 @@ def _number(value: float | None) -> float | None:
     return None if value is None or not math.isfinite(value) else float(value)
 
 
+def provenance_rows(
+    commit: str | None,
+    dirty: bool | None,
+    data: DataFingerprint | None,
+    environment: provenance.Environment | None,
+    data_written: object,
+) -> dict[str, str]:
+    """The report's Provenance table: where the result came from, one line per item."""
+    unknown = "not recorded"
+    rows = {
+        "Git commit": f"{commit or 'unknown'}{' (uncommitted changes)' if dirty else ''}",
+        "Data hash (SHA-256)": data.hash if data else unknown,
+        "Data rows (bars)": f"{data.rows:,}" if data else unknown,
+        "Data dates": f"{data.first_date} to {data.last_date}" if data and data.rows else unknown,
+        "Data as of": "the store when the run started",
+        "Data last written (UTC)": str(data_written or "unknown"),
+    }
+    if environment is not None:
+        rows |= {
+            "Python": environment.python_version,
+            "uv.lock SHA-256": environment.uv_lock_sha256 or "no uv.lock found",
+            "Engine core": environment.engine_core or "none (vectorized engine)",
+            "Rust core version": environment.rust_core_version or "not used",
+            "Operating system": environment.os,
+        }
+    return rows
+
+
 def execute(
     config: BacktestConfig,
     *,
@@ -141,7 +171,14 @@ def execute(
     result: BacktestResult | None = None
     error: Exception | None = None
     report: Path | None = None
+    environment: provenance.Environment | None = None
+    data: DataFingerprint | None = None
     try:
+        environment = provenance.environment(config)
+        universe = resolve_universe(config, universe_config)
+        data = provenance.run_fingerprint(
+            provenance.data_symbols(config, universe), config.end, data_dir=data_dir
+        )
         result = run_backtest(config, data_dir=data_dir, universe_config=universe_config)
         report = Path(reports_dir or DEFAULT_REPORTS_DIR) / f"{run_id}_{config.name}.html"
         write_report(
@@ -151,10 +188,10 @@ def execute(
                 "Run id": run_id,
                 "Created (UTC)": f"{created:%Y-%m-%d %H:%M:%S}",
                 "Config hash": config.config_hash(),
-                "Git commit": f"{commit or 'unknown'}{' (uncommitted changes)' if dirty else ''}",
-                "Data last written (UTC)": result.data_snapshot or "unknown",
                 "Notes": notes or config.notes or "",
             },
+            provenance_rows(commit, dirty, data, environment, result.data_snapshot),
+            data.per_symbol,
         )
     except Exception as exc:
         error = exc
@@ -187,6 +224,15 @@ def execute(
         else f"{type(error).__name__}: {error}" + (f" | {said}" if said else ""),
         name=config.name,
         status=registry.OK if error is None else registry.FAILED,
+        data_hash=data.hash if data else None,
+        data_per_symbol_json=json.dumps(data.per_symbol, sort_keys=True) if data else None,
+        data_rows=data.rows if data else None,
+        data_as_of=None,
+        python_version=environment.python_version if environment else None,
+        uv_lock_sha256=environment.uv_lock_sha256 if environment else None,
+        engine_core=environment.engine_core if environment else None,
+        rust_core_version=environment.rust_core_version if environment else None,
+        os=environment.os if environment else None,
     )
     registry.log_run(record, data_dir)
     return RunOutcome(record=record, result=result if error is None else None, error=error)

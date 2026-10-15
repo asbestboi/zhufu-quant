@@ -13,13 +13,21 @@ from rich.console import Console
 from rich.table import Table
 
 from qr import crosscheck as crosscheck_module
-from qr import storage
+from qr import snapshots, storage
 from qr.adjust import Adjustment
 from qr.backtest.config import load_backtest_config
+from qr.backtest.provenance import per_symbol_hashes, verify_run
 from qr.backtest.registry import read_runs
 from qr.backtest.report import METRIC_ROWS, format_metric
 from qr.backtest.runner import execute
-from qr.config import ConfigError, UniverseConfig, db_path, load_config, load_env_file
+from qr.config import (
+    ConfigError,
+    UniverseConfig,
+    db_path,
+    load_config,
+    load_env_file,
+    raw_dir,
+)
 from qr.ingest import FAILED, PARTIAL, run_ingest
 from qr.load import get_bars
 from qr.sources.base import SourceError
@@ -336,6 +344,28 @@ def export(
     console.print(f"Wrote {len(frame):,} rows ({adjustment}) to {out}")
 
 
+# --------------------------------------------------------------------------- snapshots
+
+snapshots_app = typer.Typer(help="The raw snapshot files and their hashes.", no_args_is_help=True)
+app.add_typer(snapshots_app, name="snapshots")
+
+
+@snapshots_app.command("backfill")
+def snapshots_backfill(data_dir: DataDirOption = None) -> None:
+    """Hash raw snapshot files that are not in the manifest yet and record them."""
+    raw_root = raw_dir(data_dir)
+    try:
+        with storage.connect(db_path(data_dir)) as con:
+            storage.init_schema(con)
+            added, already = snapshots.backfill_manifest(con, raw_root)
+    except OSError as exc:
+        raise _fail(str(exc)) from exc
+    console.print(
+        f"Added {added:,} snapshot files to the manifest "
+        f"({already:,} were already listed) from {raw_root}"
+    )
+
+
 # --------------------------------------------------------------------------- backtest
 
 backtest_app = typer.Typer(help="Run and compare backtests.", no_args_is_help=True)
@@ -453,6 +483,134 @@ def backtest_list(
     console.print(table)
 
 
+def _one_run(runs: pd.DataFrame, wanted: str) -> dict[str, Any]:
+    """The single registry row whose id starts with ``wanted``; fails otherwise."""
+    matches = runs[runs["run_id"].str.startswith(wanted)]
+    if len(matches) != 1:
+        problem = "no run" if matches.empty else f"{len(matches)} runs"
+        raise _fail(f"{problem} with an id starting with '{wanted}' (see `qr backtest list`)")
+    return {str(k): v for k, v in matches.iloc[0].to_dict().items()}
+
+
+def _shown(value: Any, missing: str = "not recorded") -> str:
+    return (
+        missing if value is None or (not isinstance(value, str) and pd.isna(value)) else str(value)
+    )
+
+
+@backtest_app.command("show")
+def backtest_show(
+    run_id: Annotated[str, typer.Argument(help="Run id (a unique prefix is enough).")],
+    data_dir: DataDirOption = None,
+) -> None:
+    """Show one run: its full resolved config, provenance, and metrics."""
+    run = _one_run(read_runs(data_dir, run_ids=[run_id]), run_id)
+
+    summary = Table(title=f"Run {run['run_id']}", show_header=False)
+    summary.add_column("field")
+    summary.add_column("value", overflow="fold")
+    status_colour = "green" if run["status"] == "ok" else "red"
+    for label, value in (
+        ("name", run["name"]),
+        ("strategy", run["strategy"]),
+        ("engine", run["engine"]),
+        ("status", f"[{status_colour}]{run['status']}[/{status_colour}]"),
+        ("created (UTC)", _run_date(run["created_at"])),
+        ("period", f"{_date(run['start_date'])} to {_date(run['end_date'])}"),
+        ("config hash", run["config_hash"]),
+        ("report", _shown(run["report_path"], "none")),
+        ("notes", _shown(run["notes"], "")),
+    ):
+        summary.add_row(label, str(value))
+    console.print(summary)
+
+    metrics = Table(title="Metrics (after costs)", show_header=False)
+    metrics.add_column("metric")
+    metrics.add_column("value", justify="right")
+    for key, heading, kind in _RUN_METRICS:
+        metrics.add_row(heading, format_metric(run[key], kind))
+    console.print(metrics)
+
+    dirty = run["git_dirty"]
+    has_dirty = dirty is not None and not pd.isna(dirty)
+    origin = Table(title="Provenance", show_header=False)
+    origin.add_column("field")
+    origin.add_column("value", overflow="fold")
+    for label, value in (
+        (
+            "git commit",
+            _shown(run["git_commit"], "unknown")
+            + (" (uncommitted changes)" if has_dirty and bool(dirty) else ""),
+        ),
+        ("data hash", _shown(run["data_hash"])),
+        ("data rows (bars)", _shown(run["data_rows"])),
+        (
+            "data as of",
+            _shown(run["data_as_of"], "the store when the run started")
+            if not pd.isna(run["data_hash"])
+            else "not recorded",
+        ),
+        ("data last written (UTC)", _shown(run["data_snapshot"])),
+        ("python", _shown(run["python_version"])),
+        ("uv.lock sha256", _shown(run["uv_lock_sha256"])),
+        (
+            "engine core",
+            _shown(run["engine_core"], "none (vectorized engine)")
+            if not pd.isna(run["python_version"])
+            else "not recorded",
+        ),
+        ("rust core version", _shown(run["rust_core_version"], "not used")),
+        ("operating system", _shown(run["os"])),
+    ):
+        origin.add_row(label, value)
+    console.print(origin)
+    hashes = per_symbol_hashes(run["data_per_symbol_json"])
+    if hashes:
+        per_symbol = Table(title="Data hash per symbol")
+        per_symbol.add_column("symbol")
+        per_symbol.add_column("sha256")
+        for symbol, digest in sorted(hashes.items()):
+            per_symbol.add_row(symbol, digest)
+        console.print(per_symbol)
+
+    console.print("[bold]Config (resolved)[/bold]")
+    console.print_json(str(run["config_json"]))
+
+
+@backtest_app.command("verify")
+def backtest_verify(
+    run_id: Annotated[str, typer.Argument(help="Run id (a unique prefix is enough).")],
+    data_dir: DataDirOption = None,
+) -> None:
+    """Check whether the data under a run is still exactly what it used.
+
+    Exit code 0 when it matches, 1 when the data changed or cannot be checked.
+    """
+    run = _one_run(read_runs(data_dir, run_ids=[run_id]), run_id)
+    try:
+        outcome = verify_run(run, data_dir)
+    except (ValueError, StorageError) as exc:
+        raise _fail(str(exc)) from exc
+    if outcome.matches:
+        console.print(
+            f"[green]match[/green]: run {run['run_id']} read data with hash "
+            f"{outcome.recorded_hash[:16]}..., and the store still has exactly that data."
+        )
+        return
+    console.print(
+        f"[red]data changed[/red]: run {run['run_id']} used data with hash "
+        f"{outcome.recorded_hash[:16]}..., now {(outcome.current_hash or 'unavailable')[:16]}..."
+    )
+    for symbol in outcome.changed:
+        why = "no longer in the store" if symbol in outcome.missing else "different bars or actions"
+        console.print(f"  {symbol}: {why}")
+    console.print(
+        "Rerunning the config now would read different data than this run did. "
+        "See `qr validate` for recorded provider revisions."
+    )
+    raise typer.Exit(code=1)
+
+
 @backtest_app.command("compare")
 def backtest_compare(
     run_ids: Annotated[list[str], typer.Argument(help="Run ids (unique prefixes are enough).")],
@@ -460,13 +618,7 @@ def backtest_compare(
 ) -> None:
     """Show the logged metrics of several runs side by side."""
     runs = read_runs(data_dir, run_ids=run_ids)
-    chosen: list[dict[str, Any]] = []
-    for wanted in run_ids:
-        matches = runs[runs["run_id"].str.startswith(wanted)]
-        if len(matches) != 1:
-            problem = "no run" if matches.empty else f"{len(matches)} runs"
-            raise _fail(f"{problem} with an id starting with '{wanted}' (see `qr backtest list`)")
-        chosen.append({str(k): v for k, v in matches.iloc[0].to_dict().items()})
+    chosen = [_one_run(runs, wanted) for wanted in run_ids]
     table = Table(title="Backtest comparison")
     table.add_column("")
     for run in chosen:

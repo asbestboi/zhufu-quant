@@ -298,6 +298,8 @@ body {{ margin: 0; background: {SURFACE}; color: {TEXT};
 main {{ max-width: 980px; margin: 0 auto; padding: 24px 16px 64px; }}
 h1 {{ font-size: 22px; margin: 0 0 4px; }}
 h2 {{ font-size: 15px; margin: 36px 0 8px; }}
+h3 {{ font-size: 13px; margin: 20px 0 6px; }}
+code {{ font: 12px ui-monospace, "Cascadia Mono", Consolas, monospace; }}
 p.sub, p.note {{ color: {MUTED}; margin: 0 0 8px; }}
 .tiles {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px; margin: 20px 0 8px; }}
@@ -366,8 +368,45 @@ def _cost_table(result: BacktestResult) -> str:
     return f"<table><tr><th>Before and after costs</th><th>USD</th></tr>{body}</table>"
 
 
-def render_report(result: BacktestResult, metadata: Mapping[str, Any] | None = None) -> str:
-    """The complete tearsheet as one HTML string."""
+def _provenance_section(
+    provenance: Mapping[str, Any] | None, per_symbol: Mapping[str, str] | None
+) -> str:
+    if not provenance and not per_symbol:
+        return ""
+    rows = "".join(
+        f"<tr><td>{html.escape(str(key))}</td><td><code>{html.escape(str(value))}</code></td></tr>"
+        for key, value in (provenance or {}).items()
+    )
+    symbols = "".join(
+        f"<tr><td>{html.escape(symbol)}</td><td><code>{html.escape(digest)}</code></td></tr>"
+        for symbol, digest in sorted((per_symbol or {}).items())
+    )
+    hashes = (
+        f"""<h3>Data hash per symbol</h3>
+<div class="scroll"><table><tr><th>Symbol</th><th>SHA-256</th></tr>{symbols}</table></div>"""
+        if symbols
+        else ""
+    )
+    return f"""<h2>Provenance</h2>
+<p class="note">Which data and which environment produced this result. The data hash covers
+the unadjusted bars and corporate actions of every symbol read (the benchmark included),
+full history up to the end date. <code>qr backtest verify RUN_ID</code> checks whether that
+data is still the same.</p>
+<div class="scroll"><table><tr><th>Field</th><th>Value</th></tr>{rows}</table></div>
+{hashes}"""
+
+
+def render_report(
+    result: BacktestResult,
+    metadata: Mapping[str, Any] | None = None,
+    provenance: Mapping[str, Any] | None = None,
+    per_symbol: Mapping[str, str] | None = None,
+) -> str:
+    """The complete tearsheet as one HTML string.
+
+    ``metadata`` fills the Run table; ``provenance`` and ``per_symbol`` (data hash per
+    symbol) fill the Provenance section, which is left out when both are empty.
+    """
     config = result.config
     net, gross = result.metrics, result.gross_metrics
     with matplotlib.rc_context(_RC):  # type: ignore[arg-type]
@@ -429,6 +468,7 @@ many ideas, the best one looks good by luck. The registry keeps every run so tha
 can apply the Deflated Sharpe Ratio.</p>
 <h2>Run</h2>
 <div class="scroll"><table><tr><th>Field</th><th>Value</th></tr>{meta_rows}</table></div>
+{_provenance_section(provenance, per_symbol)}
 <h2>Config</h2>
 <pre>{config_text}</pre>
 </main></body>
@@ -437,10 +477,14 @@ can apply the Deflated Sharpe Ratio.</p>
 
 
 def write_report(
-    result: BacktestResult, path: Path | str, metadata: Mapping[str, Any] | None = None
+    result: BacktestResult,
+    path: Path | str,
+    metadata: Mapping[str, Any] | None = None,
+    provenance: Mapping[str, Any] | None = None,
+    per_symbol: Mapping[str, str] | None = None,
 ) -> Path:
     """Write the tearsheet to ``path`` (parent folders are created) and return the path."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(render_report(result, metadata), encoding="utf-8")
+    target.write_text(render_report(result, metadata, provenance, per_symbol), encoding="utf-8")
     return target

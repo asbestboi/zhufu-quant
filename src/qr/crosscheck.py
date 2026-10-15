@@ -228,7 +228,12 @@ def run_crosscheck(
                         message = str(exc) if known else f"{type(exc).__name__}: {exc}"
                         result = SymbolCrosscheck(symbol, FAILED, message=message)
                     else:
-                        snapshots.write_snapshot(raw_root, other.name, symbol, bars, actions, now)
+                        snapshot = snapshots.write_snapshot(
+                            raw_root, other.name, symbol, bars, actions, now
+                        )
+                        storage.record_snapshots(
+                            con, snapshots.manifest_entries(raw_root, other.name, symbol, snapshot)
+                        )
                         closes = compare_closes(
                             symbol,
                             stored,
