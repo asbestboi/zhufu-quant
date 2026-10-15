@@ -372,6 +372,8 @@ Override the hooks you need. Anything submitted in `on_bar` is executed on the n
 session.
 
 ```python
+from collections.abc import Mapping
+
 from qr.backtest.account import Trade
 from qr.backtest.events import Bar
 from qr.backtest.strategy import Context, EventStrategy
@@ -381,24 +383,32 @@ class AboveAverageEvents(EventStrategy):
     def __init__(self, window: int = 100) -> None:
         self.window = window
 
-    def on_bar(self, ctx: Context, bars: dict[str, Bar]) -> None:
+    def on_bar(self, ctx: Context, bars: Mapping[str, Bar]) -> None:
         if not ctx.is_rebalance:  # the config's `rebalance` schedule
             return
         for symbol in ctx.symbols:
-            prices = ctx.history(symbol, self.window)  # past only, adjusted
+            prices = ctx.history(symbol, self.window)  # NumPy array: past only, adjusted
             if len(prices) < self.window:
                 continue
-            above = prices.iloc[-1] > prices.mean()
+            above = prices[-1] > prices.mean()
             ctx.order_target_weight(symbol, 1 / len(ctx.symbols) if above else 0.0)
 
     def on_fill(self, ctx: Context, trade: Trade) -> None: ...  # also on_start, on_end
 ```
 
 `Context` offers `now`, `symbols`, `cash`, `equity`, `account` (a full `AccountState`),
-`position(symbol)`, `history(symbol, n, field="close", adjusted=True)`, `is_rebalance`,
-`open_orders()`, and the order methods `order(symbol, quantity)` (signed; a market order,
+`position(symbol)`, `history(symbol, n, field="close", adjusted=True)`, `history_df(...)`,
+`is_rebalance`, `open_orders()`, and the order methods `order(symbol, quantity)` (signed; a market order,
 or market-on-close under `execution: next_close`), `order_limit(symbol, quantity, price,
 tif="gtc"|"day")`, `order_target_quantity`, `order_target_weight`, and `cancel`.
+
+`history` returns a **read-only NumPy array**, oldest value first, ending with today's bar.
+Unadjusted fields and volume are views of the engine's data (no copy); adjusted prices are
+rescaled into a small new array, because the adjustment must only use actions that have
+already happened. Writing to either raises an error. `history_df` gives the same values as
+a pandas Series indexed by date; it is several times slower, so keep it out of code that
+runs on every bar. `bars` is a read-only mapping of the symbols that traded that session;
+a `Bar` is only built when a symbol is looked up.
 
 Register both versions under one name with `register("name", vectorized=..., event=...)`
 before running, or call the engines directly:
@@ -756,6 +766,15 @@ pass than real trading.
 - **Event-engine history is adjusted point-in-time.** `ctx.history()` rescales the stored
   adjusted series so that today's value is the traded price, which removes every
   corporate action after the current bar.
+- **Strategies get arrays, not pandas objects.** Building a pandas Series for every
+  `history()` call, a `Bar` for every symbol every session, and a `Timestamp` every step
+  took most of the event engine's time (`docs/perf/baseline.md`). `history()` now returns
+  a read-only NumPy array, session bars are built on demand, and session dates are
+  converted once per run. Adjusted history is still a small new array, not a view: a view
+  of the stored adjusted series would carry adjustments for corporate actions that have
+  not happened yet. The read-only flag stops accidental writes; a strategy that switches
+  it back on deliberately can still change the data. `history_df()` keeps the old pandas
+  form. Results are bit-for-bit the same as before.
 - **Weights on a symbol without data are dropped, not redistributed.** The engine will
   not guess how a strategy wants its weights renormalized.
 - **Runs are logged to their own database**, `data/backtests.duckdb`, not to
