@@ -34,6 +34,12 @@ pytestmark = pytest.mark.usefixtures("engine_core")
 __all__ = ["project"]  # the fixture, imported for this module's tests
 
 runner = CliRunner()
+# BacktestConfig's fields before research-discipline part 2 added any.
+FIELDS_BEFORE_PART_2 = {
+    "name", "engine", "engine_core", "strategy", "params", "universe", "start", "end",
+    "initial_cash", "benchmark", "execution", "rebalance", "costs", "constraints",
+    "whole_shares", "risk_free_rate", "lookahead_checks", "notes",
+}  # fmt: skip
 COSTS = {"commission_model": "ibkr_tiered", "spread_bps": 1, "slippage_bps": 2}
 
 
@@ -79,7 +85,7 @@ def test_a_multiplier_of_one_leaves_the_config_hash_alone() -> None:
     assert explicit.config_hash() == config.config_hash()
     assert momentum(data, "vectorized", cost_multiplier=2.0).config_hash() != config.config_hash()
     # The hash of a config written before these options existed is unchanged.
-    old = config.model_dump(mode="json", exclude={"engine_core", "cost_multiplier", "cost_stress"})
+    old = config.model_dump(mode="json", include=FIELDS_BEFORE_PART_2 - {"engine_core"})
     import hashlib
 
     text = json.dumps(old, sort_keys=True, separators=(",", ":"))
