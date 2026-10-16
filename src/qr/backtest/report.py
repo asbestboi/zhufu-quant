@@ -321,6 +321,10 @@ ul.warnings {{ margin: 8px 0; padding: 10px 12px 10px 30px; border-radius: 8px;
   background: #fdf3e7; border: 1px solid #f2cf9f; }}
 ul.warnings li {{ margin: 2px 0; }}
 .flag {{ font-weight: 600; color: {NEGATIVE}; }}
+.label {{ display: inline-block; padding: 1px 8px; border-radius: 10px;
+  background: {NEUTRAL}; font-size: 12px; font-weight: 600; }}
+.reused {{ margin: 12px 0; padding: 10px 12px; border-radius: 8px; color: #fff;
+  background: {NEGATIVE}; font-weight: 600; }}
 td.wrap {{ white-space: normal; text-align: left; }}
 pre {{ background: #f4f3f0; border-radius: 8px; padding: 12px; overflow-x: auto;
   font-size: 12px; }}
@@ -371,6 +375,17 @@ def _cost_table(result: BacktestResult) -> str:
     ]
     body = "".join(f"<tr><td>{label}</td><td>{value}</td></tr>" for label, value in rows)
     return f"<table><tr><th>Before and after costs</th><th>USD</th></tr>{body}</table>"
+
+
+def _reused_banner(result: BacktestResult) -> str:
+    if result.holdout_reused is None:
+        return ""
+    return (
+        '<div class="reused">Holdout reused: this sealed segment was already run for '
+        f"study {html.escape(str(result.config.study_id))}, and was run again with a "
+        f"different config. Reason given: {html.escape(result.holdout_reused)}. This is no "
+        "longer an untouched test.</div>"
+    )
 
 
 def _assumptions_section(assumptions: Mapping[str, Any] | None) -> str:
@@ -510,7 +525,9 @@ def render_report(
 </head>
 <body><main>
 <h1>{html.escape(config.name)}</h1>
-<p class="sub">{html.escape(config.strategy)} · {config.engine} engine ·
+{_reused_banner(result)}
+<p class="sub"><span class="label">{html.escape(result.label)}</span> ·
+{html.escape(config.strategy)} · {config.engine} engine ·
 {sessions[0].date()} to {sessions[-1].date()} · {len(sessions):,} sessions ·
 starting cash {config.initial_cash:,.0f}</p>
 <div class="tiles">{tiles}</div>
