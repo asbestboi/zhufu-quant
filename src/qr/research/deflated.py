@@ -45,9 +45,11 @@ skew and fat tails. Moments are population moments, as in
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from statistics import NormalDist
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -144,3 +146,33 @@ def deflated_sharpe(
     variance = float(np.var(finite, ddof=1)) if len(finite) > 1 else 0.0
     benchmark = expected_max_sharpe(count, variance)
     return Deflated(probabilistic_sharpe(moments, benchmark), count, variance, benchmark)
+
+
+def moments_from_row(row: Mapping[str, Any]) -> ReturnMoments | None:
+    """A registry row's stored moments; None for runs logged before they were stored."""
+    raw = [row.get(k) for k in ("n_returns", "sharpe", "return_skew", "return_kurtosis")]
+    values = [float(v) for v in raw if v is not None and not pd.isna(v)]
+    if len(values) != len(raw):
+        return None
+    n, sharpe, skew, kurtosis = values
+    return ReturnMoments(int(n), per_period(sharpe), skew, kurtosis)
+
+
+def study_deflated(
+    study_id: str,
+    moments: ReturnMoments,
+    data_dir: Path | str | None = None,
+    *,
+    extra_sharpe: float | None = None,
+) -> Deflated:
+    """DSR of a run against every trial of ``study_id`` (``extra_sharpe``: a run not yet
+    logged, counted as one more trial)."""
+    from qr.research.sweeps import study_trials  # sweeps imports this module
+
+    trials = study_trials(study_id, data_dir)
+    sharpes = [float(s) for s in trials["sharpe"] if pd.notna(s)] if len(trials) else []
+    count = len(trials)
+    if extra_sharpe is not None:
+        sharpes.append(extra_sharpe)
+        count += 1
+    return deflated_sharpe(moments, sharpes, n_trials=count)

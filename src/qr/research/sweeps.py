@@ -461,6 +461,9 @@ class SweepSummary:
     grid: dict[str, list[Any]] | None
     n_trials: int  # the study's count
     stability: Stability | None
+    best_index: int | None  # the trial with the highest Sharpe
+    deflated: Any = None  # its Deflated Sharpe Ratio against every trial of the study
+    psr: float = math.nan  # its Probabilistic Sharpe Ratio (against zero)
 
 
 def summarize_sweep(sweep_id: str, data_dir: Path | str | None = None) -> SweepSummary:
@@ -470,11 +473,21 @@ def summarize_sweep(sweep_id: str, data_dir: Path | str | None = None) -> SweepS
     params = pd.DataFrame([json.loads(str(p)) for p in trials["params_json"]])
     table = pd.concat([trials.reset_index(drop=True), params], axis=1)
     grid = spec.get("grid")
-    found = None
-    if grid:
-        sharpes = [float(v) if pd.notna(v) else math.nan for v in trials["sharpe"]]
-        found = stability(grid, sharpes)
-    return SweepSummary(row, table, grid, count_trials(str(row["study_id"]), data_dir), found)
+    sharpes = [float(v) if pd.notna(v) else math.nan for v in trials["sharpe"]]
+    found = stability(grid, sharpes) if grid else None
+    finite = [(i, v) for i, v in enumerate(sharpes) if math.isfinite(v)]
+    best = max(finite, key=lambda pair: (pair[1], -pair[0]))[0] if finite else None
+    deflated, psr = None, math.nan
+    if best is not None:
+        from qr.research.deflated import moments_from_row, probabilistic_sharpe, study_deflated
+
+        moments = moments_from_row({str(k): v for k, v in trials.iloc[best].to_dict().items()})
+        if moments is not None:
+            deflated = study_deflated(str(row["study_id"]), moments, data_dir)
+            psr = probabilistic_sharpe(moments, 0.0)
+    return SweepSummary(
+        row, table, grid, count_trials(str(row["study_id"]), data_dir), found, best, deflated, psr
+    )
 
 
 def heatmap_frame(summary: SweepSummary) -> pd.DataFrame | None:
@@ -502,7 +515,7 @@ def render_sweep(summary: SweepSummary) -> str:
     )
     columns = ["Trial", *names, "Status", "Sharpe", "CAGR", "Max drawdown", "Turnover"]
     head = "".join(f"<th>{escape(n)}</th>" for n in columns)
-    best = summary.stability.best_index if summary.stability else None
+    best = summary.best_index
     body = []
     for row in summary.trials.itertuples(index=False):
         mark = ' style="font-weight:600"' if row.trial_index == best else ""
@@ -518,13 +531,28 @@ def render_sweep(summary: SweepSummary) -> str:
     chart = _heatmap_svg(summary)
     study = escape(str(sweep["study_id"]))
     segment = f"{escape(str(sweep['segment']))} of {escape(str(sweep['split_name']))}"
-    best_sharpe = summary.stability.best_sharpe if summary.stability else _best(summary)
-    tiles = tearsheet._tile(
-        "Trials in study", f"{summary.n_trials:,}", f"study {study}, every sweep and run"
-    ) + tearsheet._tile(
-        "Best Sharpe",
-        tearsheet.format_metric(best_sharpe, "num"),
-        f"best of {len(summary.trials)} in this sweep",
+    best_sharpe = _best(summary)
+    found = summary.deflated
+    dsr = (
+        ""
+        if found is None
+        else tearsheet._tile(
+            "Deflated Sharpe (DSR)",
+            tearsheet.format_metric(found.dsr, "pct"),
+            f"best trial; PSR {tearsheet.format_metric(summary.psr, 'pct')}; luck alone reaches "
+            f"Sharpe {found.benchmark_annualized:.2f} in {found.n_trials} trials",
+        )
+    )
+    tiles = (
+        tearsheet._tile(
+            "Trials in study", f"{summary.n_trials:,}", f"study {study}, every sweep and run"
+        )
+        + tearsheet._tile(
+            "Best Sharpe",
+            tearsheet.format_metric(best_sharpe, "num"),
+            f"best of {len(summary.trials)} in this sweep",
+        )
+        + dsr
     )
     return f"""<!doctype html>
 <html lang="en">
@@ -541,7 +569,8 @@ def render_sweep(summary: SweepSummary) -> str:
 <code>{escape(str(sweep["sweep_id"]))}</code></p>
 <div class="tiles">{tiles}</div>
 <p class="note">The best of many trials looks good by luck alone. Count every trial: the
-study's total is what any correction for multiple testing must use.</p>
+study's total is what the Deflated Sharpe Ratio uses. DSR is the probability that the
+best trial's true Sharpe is above what that many worthless trials would reach by luck.</p>
 {_stability_html(summary)}
 {f"<figure>{chart}</figure>" if chart else ""}
 <h2>Trials</h2>

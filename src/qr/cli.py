@@ -635,6 +635,16 @@ def backtest_show(
     metrics.add_column("value", justify="right")
     for key, heading, kind in _RUN_METRICS:
         metrics.add_row(heading, format_metric(run[key], kind))
+    study = run["study_id"]
+    if isinstance(study, str) and study:
+        from qr.research.deflated import moments_from_row, study_deflated
+        from qr.research.sweeps import count_trials
+
+        metrics.add_row(f"Trials in study {study}", str(count_trials(study, data_dir)))
+        moments = moments_from_row(run)
+        if moments is not None:
+            found = study_deflated(study, moments, data_dir)
+            metrics.add_row("Deflated Sharpe (DSR)", format_metric(found.dsr, "pct"))
     console.print(metrics)
 
     dirty = run["git_dirty"]
@@ -977,6 +987,15 @@ def _print_sweep(summary: SweepSummary) -> None:
         f"[bold]Trials in study {sweep['study_id']}: {summary.n_trials}[/bold] "
         "(every sweep, failed trials, and single runs)"
     )
+    found = summary.deflated
+    if found is not None and summary.best_index is not None:
+        console.print(
+            f"Best trial {summary.best_index}: Sharpe "
+            f"{format_metric(_maybe(trials.iloc[summary.best_index]['sharpe']), 'num')}, PSR "
+            f"{format_metric(summary.psr, 'pct')}, [bold]DSR {format_metric(found.dsr, 'pct')}"
+            f"[/bold] (luck alone reaches Sharpe {found.benchmark_annualized:.2f} in "
+            f"{found.n_trials} trials)"
+        )
 
 
 def _maybe(value: Any) -> float | None:

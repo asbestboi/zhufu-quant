@@ -378,13 +378,24 @@ def _cost_table(result: BacktestResult) -> str:
 
 
 def _study_tiles(result: BacktestResult) -> list[str]:
-    """For a run in a study: how many trials the study has (and later, its DSR)."""
+    """For a run in a study: how many trials the study has, and the run's DSR."""
     if result.study_trials is None:
         return []
     study = html.escape(str(result.config.study_id))
-    return [
+    tiles = [
         _tile("Trials in study", f"{result.study_trials:,}", f"study {study}, this run included")
     ]
+    found = result.deflated
+    if found is not None:
+        tiles.append(
+            _tile(
+                "Deflated Sharpe (DSR)",
+                format_metric(found.dsr, "pct"),
+                f"PSR {format_metric(result.metrics.get('psr'), 'pct')}; luck alone reaches "
+                f"Sharpe {found.benchmark_annualized:.2f} in {found.n_trials} trials",
+            )
+        )
+    return tiles
 
 
 def _reused_banner(result: BacktestResult) -> str:
@@ -552,8 +563,9 @@ under simplifying assumptions, not a forecast.</p>
 <div class="scroll">{_metrics_table(result)}</div>
 <p class="note">The Probabilistic Sharpe Ratio is the chance that the true Sharpe ratio is
 above zero given this one sample. It does not account for multiple testing: after trying
-many ideas, the best one looks good by luck. The registry keeps every run so that step 3
-can apply the Deflated Sharpe Ratio.</p>
+many ideas, the best one looks good by luck. For a run in a study, the Deflated Sharpe
+Ratio (in the tiles above) does: it is the same probability, measured against the best
+Sharpe that the study's number of trials would reach by luck alone.</p>
 {_assumptions_section(result.assumptions)}
 <h2>Run</h2>
 <div class="scroll"><table><tr><th>Field</th><th>Value</th></tr>{meta_rows}</table></div>

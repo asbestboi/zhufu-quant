@@ -159,6 +159,8 @@ class BacktestResult:
     holdout_reused: str | None = None
     # For a run in a study: how many trials the study has, this run included.
     study_trials: int | None = None
+    # ... and the Deflated Sharpe Ratio against all of them (qr.research.deflated).
+    deflated: Any = None
 
     @property
     def equity(self) -> pd.Series:

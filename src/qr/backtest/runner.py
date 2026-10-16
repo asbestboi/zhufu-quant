@@ -294,9 +294,16 @@ def execute(
         )
         result.holdout_reused = reused
         if config.study_id:
+            from qr.research.deflated import return_moments, study_deflated
             from qr.research.sweeps import count_trials  # sweeps imports this module
 
             result.study_trials = count_trials(config.study_id, data_dir) + 1
+            result.deflated = study_deflated(
+                config.study_id,
+                return_moments(excess_returns(result)),
+                data_dir,
+                extra_sharpe=result.metrics.get("sharpe"),
+            )
         report = Path(reports_dir or DEFAULT_REPORTS_DIR) / f"{run_id}_{config.name}.html"
         write_report(
             result,
