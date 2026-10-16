@@ -15,8 +15,10 @@ Conventions:
 
 from __future__ import annotations
 
+import json
 import math
-from datetime import date
+from datetime import date, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -36,6 +38,9 @@ COMPARISON_PAIRS = [("XOM", "CVX"), ("V", "MA"), ("HD", "LOW"), ("GS", "MS")]
 TRAIN = (date(2010, 1, 1), date(2018, 12, 31))
 VALIDATION = (date(2019, 1, 1), date(2022, 12, 31))
 TEST_START = date(2023, 1, 1)
+# The same periods as a reusable split (configs/splits/pairs_2010.yaml).
+SPLIT = "pairs_2010"
+SEALED_RESULTS = "reports/pairs/test_results.json"
 
 # --------------------------------------------------------------------------- prices
 
@@ -335,3 +340,56 @@ def summarize(result: BacktestResult) -> dict[str, float]:
         f"benchmark_{key}": float(result.benchmark_metrics.get(key, math.nan)) for key in HEADLINE
     }
     return out
+
+
+# --------------------------------------------------------------------------- sealed test
+
+
+def study_id(pair: tuple[str, str]) -> str:
+    """The holdout study id of one pair, e.g. ``pairs_ko_pep``.
+
+    The study tested five pairs with the same frozen parameters; each is a config of its
+    own, so each is its own study in ``holdout_results``.
+    """
+    return f"pairs_{pair[0].lower()}_{pair[1].lower()}"
+
+
+def import_sealed_results(
+    path: Path | str = SEALED_RESULTS, data_dir: Path | str | None = None
+) -> list[str]:
+    """Copy the study's sealed test results into ``holdout_results``. Nothing is re-run.
+
+    The metrics come from the sealed file; the run id and config hash from the test run
+    the notebook logged to the registry. Already imported pairs are left alone. Returns
+    the study ids imported now.
+    """
+    from qr.backtest import registry
+    from qr.research import holdout
+
+    sealed = json.loads(Path(path).read_text(encoding="utf-8"))
+    sealed_at = datetime.fromisoformat(sealed["sealed_at"]).replace(tzinfo=None)
+    runs = registry.read_runs(data_dir)
+    imported = []
+    for pair in [MAIN_PAIR, *COMPARISON_PAIRS]:
+        name = f"pairs_{pair[0].lower()}_{pair[1].lower()}_test"
+        logged = runs[(runs["name"] == name) & (runs["status"] == registry.OK)]
+        if logged.empty:
+            raise ValueError(f"the sealed test run '{name}' is not in the registry")
+        run = logged.sort_values("created_at").iloc[0]  # the first, sealed run
+        key = study_id(pair)
+        if holdout.find(key, SPLIT, "test", data_dir) is not None:
+            continue
+        data_hash = run["data_hash"]
+        holdout.store(
+            key,
+            SPLIT,
+            "test",
+            str(run["config_hash"]),
+            None if pd.isna(data_hash) else str(data_hash),
+            str(run["run_id"]),
+            sealed["results"][f"{pair[0]} / {pair[1]} test"],
+            sealed_at,
+            data_dir,
+        )
+        imported.append(key)
+    return imported
