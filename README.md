@@ -73,8 +73,11 @@ Your own strategy configs and notebooks can go in `configs/private/` and
 | `qr crosscheck [--symbols X,Y \| --universe NAME] [--days 365]` | Compare stored closes and splits with a second source (Tiingo). See [Cross-checking](#cross-checking-against-a-second-source). |
 | `qr export SYMBOL --out f.csv [--adjustment none\|split\|total_return]` | Dump bars to CSV (total-return adjusted by default). |
 | `qr snapshots backfill` | Hash raw snapshot files written before the snapshot manifest existed and add them to it. Files already listed are skipped, so it is safe to repeat. |
-| `qr backtest run CONFIG.yaml [--notes TEXT] [--reports-dir DIR] [--engine vectorized\|event] [--engine-core python\|rust] [--no-cost-stress]` | Run a backtest, write its HTML tearsheet, log it to the registry. `--engine` and `--engine-core` override the config for this run. Also runs the config at 0x and 2x costs for the [cost stress test](#assumptions-and-cost-stress) unless `--no-cost-stress`. Exits non-zero (and logs the run as failed) if it could not run. |
+| `qr backtest run CONFIG.yaml [--notes TEXT] [--reports-dir DIR] [--engine vectorized\|event] [--engine-core python\|rust] [--no-cost-stress] [--unseal-reason TEXT]` | Run a backtest, write its HTML tearsheet, log it to the registry. `--engine` and `--engine-core` override the config for this run. Also runs the config at 0x and 2x costs for the [cost stress test](#assumptions-and-cost-stress) unless `--no-cost-stress`. On a sealed segment the [holdout rules](#splits-sealed-holdouts-and-walk-forward) apply; `--unseal-reason` overrides a refusal and is recorded permanently. Exits non-zero (and logs the run as failed) if it could not run. |
 | `qr backtest list [--strategy NAME] [--limit 20]` | Recent runs from the registry. |
+| `qr backtest walkforward CONFIG.yaml [--split NAME] [--mode anchored\|rolling] [--train-years 5] [--test-months 12] [--step-months 12] [--grid GRID.yaml] [--embargo-days N]` | Walk-forward over the split's unsealed segments: choose parameters on each train window, test them on the next, stitch the test windows. See [Splits, sealed holdouts, walk-forward](#splits-sealed-holdouts-and-walk-forward). |
+| `qr holdout list` | Every sealed test result, one per study, and every recorded override. |
+| `qr holdout import-pairs [FILE]` | Copy the pairs study's sealed test results into the holdout table, without re-running anything. |
 | `qr backtest compare RUN_ID RUN_ID ...` | Side-by-side metrics of logged runs; unique id prefixes are enough. |
 | `qr backtest show RUN_ID` | One run in full: the resolved config (every default filled in), its provenance (data hash, per-symbol hashes, environment), and its metrics. |
 | `qr backtest verify RUN_ID` | Recompute the run's data hash and say **match** or **data changed** (naming the symbols that differ). Exits 1 when the data changed or the run has no hash. See [Data hashes and provenance](#data-hashes-and-provenance). |
@@ -628,6 +631,70 @@ row per experiment (`read_runs(include_stress=True)` and `registry.read_stress_r
 fetch them). The parent row stores the assumptions, the sensitivity table,
 `break_even_multiplier`, and `fragile`. Use `--no-cost-stress` to skip the extra runs.
 
+### Splits, sealed holdouts, and walk-forward
+
+**Splits.** A study defines its periods once, in `configs/splits/<name>.yaml` (or
+`$QR_SPLITS_DIR`):
+
+```yaml
+name: default_2010
+segments:
+  train:      { start: 2010-01-01, end: 2018-12-31 }
+  validation: { start: 2019-01-01, end: 2022-12-31 }
+  test:       { start: 2023-01-01, end: null, sealed: true }   # null = latest data
+embargo_days: 5
+```
+
+Segments must be in time order and must not overlap; only the last may be open-ended;
+sealed segments come after all unsealed ones; and `embargo_days` must be written out (0
+is fine). Anything else is a config error. A backtest config then names a split and a
+segment instead of dates:
+
+```yaml
+split: default_2010
+segment: validation
+study_id: my_idea_v1        # needed on a sealed segment
+```
+
+The loader fills `start` and `end` from the segment. A strategy may read history from
+before the start (warm-up); nothing after the end is ever loaded. **The embargo** is the
+first `embargo_days` calendar days of every segment after the first: the strategy trades
+through them, but they are left out of the segment's metrics (`evaluate_from`). An
+open-ended segment runs to the latest data, and its end date is left out of the config
+hash, so the same experiment hashes the same on another day.
+
+**Labels.** Every report and registry row says what its result is: **in-sample** (the
+first segment, or no split), **validation**, **out-of-sample (walk-forward)**, or
+**sealed test**.
+
+**Sealed holdout.** The first run of a study on a sealed segment stores its result in
+`holdout_results` (in `backtests.duckdb`). After that, for the same study and segment:
+
+- the same config (same hash) shows the stored result and runs nothing;
+- a different config is refused, with the reason. `--unseal-reason "..."` runs it anyway.
+  The reason is stored permanently in `holdout_overrides`, the report shows a red
+  "holdout reused" banner, and the stored first result is never replaced.
+
+`qr holdout list` shows both tables.
+
+**Walk-forward** (`qr.research.walkforward`, `qr backtest walkforward`) uses only the
+unsealed segments. Folds are anchored (the train window grows) or rolling (it moves),
+set by `train_years`, `test_months`, and `step_months`. In each fold every grid point
+runs on the train window, with data loaded only up to its end. One is chosen (default:
+highest Sharpe after costs at 1x; NaN last; ties to the first), and that one runs once on
+the test window. Each train window ends `embargo_days` before its test window (default:
+the split's), so the stitched out-of-sample curve has no gaps. The report shows per-fold
+choices, in- and out-of-sample metrics, the stitched curve against the benchmark, and how
+often the choice changed. It is flagged **unstable** when the choice changed in more than
+half the steps. Every backtest it makes is logged with its `walkforward_id` and `fold`
+(hidden from `qr backtest list`; `read_runs(include_walkforward=True)` shows them). In
+Python, `walk_forward(..., objective=...)` takes any selection rule.
+
+```
+uv run qr backtest walkforward configs/backtests/pairs_ko_pep.yaml --split pairs_2010 \
+    --mode anchored --train-years 5 --test-months 12 --step-months 12 --grid grid.yaml
+```
+
 ### Data hashes and provenance
 
 Every run records which data and which environment produced it, in the registry, in
@@ -682,6 +749,16 @@ published once the research is finished (`notebooks/` is gitignored until then):
 Code: `qr.research.pairs` (hedge ratios, spreads, cointegration tests, signals, leg
 weights) and the `pairs` strategy for the vectorized engine, with costs in
 `configs/backtests/pairs_ko_pep.yaml`.
+
+The study's periods are the split `configs/splits/pairs_2010.yaml` (no embargo). Its
+sealed test result is in `holdout_results`, imported once with `qr holdout
+import-pairs`, without re-running. Each pair is its own study id there (`pairs_ko_pep`,
+...). Re-running train and validation through the split reproduces the sealed file's
+numbers exactly; `tests/test_research_splits.py` checks this when the local data is
+present. Notebook 04 now reads its periods from the split and its test result from the
+holdout table. It also gained a walk-forward check over 2010–2022: re-choosing the
+parameters every year, the choice changed in 5 of 7 steps (unstable), and the stitched
+2015–2022 test years had a Sharpe of −0.08.
 
 **Result: no.** 36 parameter combinations were tried on 2010–2018 KO / PEP. The chosen
 one made about 1% a year after costs in training and validation (Sharpe 0.26 and 0.20),
@@ -1020,6 +1097,29 @@ pass than real trading.
   (part 4) because they change no parameter.
 - **A failure in a stress run fails the whole run**, which is logged as failed like any
   other error. A run whose stress test cannot be computed should not look healthy.
+
+### Research discipline: splits, holdouts, walk-forward (part 3)
+
+- **The embargo trims the evaluation, not the calendar.** The spec makes a missing
+  embargo a config error but also allows adjacent segments, so `embargo_days` cannot be
+  a required gap between them. It is the first N calendar days of each later segment,
+  which are traded through but not measured. That is the stricter of the two readings:
+  the segment's dates stay as written, and the days right after the previous segment
+  never count.
+- **In walk-forward the embargo purges the train side** instead: each train window ends
+  N days before its test window. Either way no observation next to a boundary counts on
+  both sides of it, and the stitched curve stays continuous.
+- **Sealed segments must come last**, so the unsealed part of a split is one unbroken
+  range for walk-forward.
+- **One sealed result per study and segment.** The pairs study tested five pairs, which
+  are five configs, so each pair is its own study id in the holdout table.
+- **A refusal is not a run**: nothing is logged for it. A stored result shown again
+  is not logged either.
+- **Walk-forward runs skip the cost stress and the tearsheet** (as part 4's trials do)
+  but are logged with full data provenance, so the number of backtests behind a
+  walk-forward is always known.
+- **`open_end`, `split`, `segment`, `study_id`, and `evaluate_from` are left out of the
+  config hash at their defaults**, so existing configs keep their hashes.
 
 ## Rust core
 
