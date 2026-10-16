@@ -47,6 +47,14 @@ MIGRATIONS = [
     "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS engine_core TEXT",
     "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS rust_core_version TEXT",
     "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS os TEXT",
+    # Assumptions and cost stress (part 2). Stress runs are rows of their own, linked to
+    # the run they stress by parent_run_id; see stress.py.
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS parent_run_id TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS cost_multiplier DOUBLE",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS assumptions_json TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS cost_sensitivity_json TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS break_even_multiplier DOUBLE",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS fragile BOOLEAN",
 ]
 
 COLUMNS = [
@@ -78,6 +86,12 @@ COLUMNS = [
     "engine_core",
     "rust_core_version",
     "os",
+    "parent_run_id",
+    "cost_multiplier",
+    "assumptions_json",
+    "cost_sensitivity_json",
+    "break_even_multiplier",
+    "fragile",
 ]
 
 OK = "ok"
@@ -116,6 +130,12 @@ class RunRecord:
     engine_core: str | None = None  # the core that ran; None for the vectorized engine
     rust_core_version: str | None = None
     os: str | None = None
+    parent_run_id: str | None = None  # set on cost-stress runs: the run they stress
+    cost_multiplier: float | None = None  # the multiplier the costs ran at
+    assumptions_json: str | None = None
+    cost_sensitivity_json: str | None = None
+    break_even_multiplier: float | None = None  # None when outside the tested range
+    fragile: bool | None = None
 
 
 def registry_path(data_directory: Path | str | None = None) -> Path:
@@ -126,6 +146,11 @@ def registry_path(data_directory: Path | str | None = None) -> Path:
 def new_run_id(created_at: datetime) -> str:
     """A unique id that sorts by time, e.g. ``20261013T142233-3f9a1c``."""
     return f"{created_at:%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
+
+
+def stress_run_id(parent_run_id: str, multiplier: float) -> str:
+    """The id of ``parent_run_id``'s stress run at ``multiplier``, e.g. ``...-3f9a1c-x2``."""
+    return f"{parent_run_id}-x{multiplier:g}"
 
 
 def git_state(cwd: Path | str | None = None) -> tuple[str | None, bool | None]:
@@ -168,17 +193,22 @@ def read_runs(
     strategy: str | None = None,
     run_ids: list[str] | None = None,
     limit: int | None = None,
+    *,
+    include_stress: bool = False,
 ) -> pd.DataFrame:
     """Logged runs, newest first; empty (with the right columns) when nothing is logged.
 
     ``run_ids`` may be abbreviated: any unique prefix of a run id matches. A registry
-    written before a column existed reads that column as missing values.
+    written before a column existed reads that column as missing values. Cost-stress
+    runs are left out unless ``include_stress`` (see :func:`read_stress_runs`).
     """
     path = registry_path(data_directory)
     if not path.exists():
         return pd.DataFrame(columns=COLUMNS)
     query = "SELECT * FROM backtest_runs WHERE TRUE"
     params: list[object] = []
+    if not include_stress and _has_column(path, "parent_run_id"):
+        query += " AND parent_run_id IS NULL"
     if strategy is not None:
         query += " AND strategy = ?"
         params.append(strategy)
@@ -191,3 +221,24 @@ def read_runs(
         params.append(limit)
     with storage.connect(path, read_only=True) as con:
         return con.execute(query, params).df().reindex(columns=COLUMNS)
+
+
+def read_stress_runs(run_id: str, data_directory: Path | str | None = None) -> pd.DataFrame:
+    """The cost-stress runs of ``run_id`` (a full id), by multiplier."""
+    path = registry_path(data_directory)
+    if not path.exists() or not _has_column(path, "parent_run_id"):
+        return pd.DataFrame(columns=COLUMNS)
+    query = "SELECT * FROM backtest_runs WHERE parent_run_id = ? ORDER BY cost_multiplier"
+    with storage.connect(path, read_only=True) as con:
+        return con.execute(query, [run_id]).df().reindex(columns=COLUMNS)
+
+
+def _has_column(path: Path, column: str) -> bool:
+    """Whether ``backtest_runs`` in the registry at ``path`` has ``column`` yet."""
+    with storage.connect(path, read_only=True) as con:
+        found = con.execute(
+            "SELECT count(*) FROM information_schema.columns "
+            "WHERE table_name = 'backtest_runs' AND column_name = ?",
+            [column],
+        ).fetchone()
+    return bool(found and found[0])
