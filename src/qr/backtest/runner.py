@@ -33,6 +33,8 @@ from qr.config import db_path as storage_db_path
 from qr.config import universe_symbols
 from qr.fingerprint import DataFingerprint
 from qr.load import data_version, get_bars
+from qr.research import holdout
+from qr.research.splits import IN_SAMPLE, load_split
 
 DEFAULT_REPORTS_DIR = Path("reports")
 
@@ -44,6 +46,16 @@ class RunOutcome:
     record: registry.RunRecord
     result: BacktestResult | None
     error: Exception | None = None
+    # Set when the config already ran on its sealed segment: the stored result, shown
+    # instead of running again (``result`` is then None and ``record`` the stored run).
+    sealed: holdout.SealedResult | None = None
+
+
+def result_label(config: BacktestConfig) -> str:
+    """What a run of ``config`` is: in-sample, validation, or sealed test."""
+    if config.split is None or config.segment is None:
+        return IN_SAMPLE
+    return load_split(config.split).label(config.segment)
 
 
 def resolve_universe(
@@ -67,6 +79,16 @@ def _simulate(config: BacktestConfig, data: MarketData, free: bool) -> EngineOut
         return run_vectorized(strategy, data, config, costs)
     assert isinstance(strategy, EventStrategy)
     return run_event(strategy, data, config, costs)
+
+
+def _evaluated(config: BacktestConfig, output: EngineOutput) -> EngineOutput:
+    """``output`` from ``config.evaluate_from`` on (a split's embargo), else unchanged."""
+    if config.evaluate_from is None:
+        return output
+    cut = output.since(config.evaluate_from)
+    if cut.accounts.empty:
+        raise ValueError(f"no sessions from evaluate_from {config.evaluate_from} to {config.end}")
+    return cut
 
 
 def benchmark_curve(
@@ -113,8 +135,8 @@ def run_backtest(
             bars = get_bars(config.benchmark, end=config.end, data_dir=data_dir)
             benchmark_closes = bars["close"].droplevel("symbol")
 
-    net = _simulate(config, data, free=False)
-    gross = _simulate(config, data, free=True)
+    net = _evaluated(config, _simulate(config, data, free=False))
+    gross = _evaluated(config, _simulate(config, data, free=True))
     benchmark = None
     if benchmark_closes is not None:
         benchmark = benchmark_curve(
@@ -130,6 +152,7 @@ def run_backtest(
         gross_metrics=compute_metrics(gross, benchmark, rate),
         benchmark_metrics=equity_metrics(benchmark, rate) if benchmark is not None else {},
         data_snapshot=snapshot,
+        label=result_label(config),
     )
     if cost_stress and config.cost_stress:
         points = []
@@ -140,7 +163,8 @@ def run_backtest(
                 scaled = config.model_copy(
                     update={"cost_multiplier": config.cost_multiplier * multiplier}
                 )
-                metrics = compute_metrics(_simulate(scaled, data, free=False), benchmark, rate)
+                stressed = _evaluated(scaled, _simulate(scaled, data, free=False))
+                metrics = compute_metrics(stressed, benchmark, rate)
                 result.stress_metrics[float(multiplier)] = metrics
             points.append(StressPoint.from_metrics(multiplier, metrics))
         result.cost_sensitivity = CostSensitivity.from_points(points)
@@ -205,6 +229,7 @@ def execute(
     universe_config: Path | str | None = None,
     notes: str | None = None,
     cost_stress: bool = True,
+    unseal_reason: str | None = None,
 ) -> RunOutcome:
     """Run ``config``, write its tearsheet, and log it to the registry.
 
@@ -215,7 +240,37 @@ def execute(
     Each cost-stress run other than 1x is logged as a row of its own with
     ``parent_run_id`` set to this run, and gets no tearsheet. ``cost_stress=False``
     skips them.
+
+    A config on a sealed segment goes through the holdout rules first
+    (:mod:`qr.research.holdout`): the first run is stored; the same config again returns
+    the stored result without running (``outcome.sealed``); a different one raises
+    :class:`~qr.research.holdout.HoldoutError` before anything is run or logged, unless
+    ``unseal_reason`` is given.
     """
+    sealed_segment = (
+        config.split is not None
+        and config.segment is not None
+        and load_split(config.split).segment(config.segment).sealed
+    )
+    previous: holdout.SealedResult | None = None
+    if sealed_segment:
+        assert config.split is not None and config.segment is not None
+        stored = holdout.check(
+            config.study_id, config.split, config.segment, config.config_hash(),
+            unseal_reason, data_dir,
+        )  # fmt: skip
+        if stored is not None:
+            rows = registry.read_runs(data_dir, run_ids=[stored.run_id])
+            if rows.empty:
+                raise holdout.HoldoutError(
+                    f"the sealed result of run {stored.run_id} is stored, but the run is "
+                    "missing from the registry"
+                )
+            return RunOutcome(
+                record=registry.record_from_row(rows.iloc[0]), result=None, sealed=stored
+            )
+        previous = holdout.find(config.study_id or "", config.split, config.segment, data_dir)
+    reused = unseal_reason.strip() if previous is not None and unseal_reason else None
     created = storage.utcnow()
     run_id = registry.new_run_id(created)
     commit, dirty = registry.git_state()
@@ -237,6 +292,7 @@ def execute(
             cost_stress=cost_stress,
             engine_core=environment.engine_core,
         )
+        result.holdout_reused = reused
         report = Path(reports_dir or DEFAULT_REPORTS_DIR) / f"{run_id}_{config.name}.html"
         write_report(
             result,
@@ -292,8 +348,25 @@ def execute(
         os=environment.os if environment else None,
         cost_multiplier=config.cost_multiplier,
         **_stress_columns(result if error is None else None),
+        split_name=config.split,
+        segment=config.segment,
+        study_id=config.study_id,
+        result_label=result_label(config),
+        unseal_reason=reused,
     )
     registry.log_run(record, data_dir)
+    if sealed_segment and error is None and result is not None:
+        assert config.split is not None and config.segment is not None
+        if previous is None:
+            holdout.store(
+                config.study_id or "", config.split, config.segment, config.config_hash(),
+                record.data_hash, run_id, result.metrics, created, data_dir,
+            )  # fmt: skip
+        elif reused is not None:
+            holdout.record_override(
+                config.study_id or "", config.split, config.segment, run_id,
+                config.config_hash(), previous.config_hash, reused, created, data_dir,
+            )  # fmt: skip
     if error is None and result is not None:
         for multiplier, stressed in result.stress_metrics.items():
             registry.log_run(_stress_record(record, config, multiplier, stressed), data_dir)

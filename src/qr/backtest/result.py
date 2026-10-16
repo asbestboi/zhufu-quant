@@ -84,6 +84,30 @@ class EngineOutput:
             daily = daily.add(traded, fill_value=0.0).reindex(self.accounts.index)
         return (daily / self.equity).rename("turnover")
 
+    def since(self, day: Any) -> EngineOutput:
+        """The same simulation, with every table cut to sessions on or after ``day``.
+
+        For an embargo: the account carries into ``day`` as it was, so the first kept
+        session's equity is the starting point of the evaluation. Orders and the final
+        state are kept whole.
+        """
+        when = pd.Timestamp(day)
+        keep = self.accounts.index >= when
+
+        def cut(frame: pd.DataFrame | None) -> pd.DataFrame | None:
+            return None if frame is None else frame[frame.index >= when]
+
+        trades = self.trades[self.trades["date"] >= when] if len(self.trades) else self.trades
+        return EngineOutput(
+            accounts=self.accounts[keep],
+            positions=self.positions[keep],
+            trades=trades.reset_index(drop=True),
+            costs=self.costs[keep],
+            weights=cut(self.weights),
+            orders=self.orders,
+            final_state=self.final_state,
+        )
+
     def snapshot(self, day: Any) -> AccountState:
         """The account at the close of ``day`` in the unified format.
 
@@ -129,6 +153,10 @@ class BacktestResult:
     cost_sensitivity: CostSensitivity | None = None
     # Metrics of each stress run other than 1x, by multiplier.
     stress_metrics: dict[float, dict[str, float]] = field(default_factory=dict)
+    # What the result is (qr.research.splits labels), shown on every report.
+    label: str = "in-sample"
+    # Set when a sealed segment was run again with --unseal-reason: the reason.
+    holdout_reused: str | None = None
 
     @property
     def equity(self) -> pd.Series:
