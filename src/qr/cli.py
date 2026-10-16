@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Annotated, Any
 
 import pandas as pd
 import typer
+import yaml
 from rich.console import Console
 from rich.table import Table
 
@@ -19,7 +21,8 @@ from qr.backtest.config import load_backtest_config
 from qr.backtest.provenance import per_symbol_hashes, verify_run
 from qr.backtest.registry import read_runs
 from qr.backtest.report import METRIC_ROWS, format_metric
-from qr.backtest.runner import execute
+from qr.backtest.runner import DEFAULT_REPORTS_DIR, execute
+from qr.backtest.stress import CostSensitivity
 from qr.config import (
     ConfigError,
     UniverseConfig,
@@ -30,6 +33,7 @@ from qr.config import (
 )
 from qr.ingest import FAILED, PARTIAL, run_ingest
 from qr.load import get_bars
+from qr.research.holdout import HoldoutError, SealedResult
 from qr.sources.base import SourceError
 from qr.storage import StorageError
 from qr.validate import summarize, validate_symbols
@@ -407,8 +411,27 @@ def backtest_run(
             "and QR_ENGINE_CORE).",
         ),
     ] = None,
+    no_cost_stress: Annotated[
+        bool,
+        typer.Option(
+            "--no-cost-stress",
+            help="Skip the runs at the config's other cost multipliers (cost_stress).",
+        ),
+    ] = False,
+    unseal_reason: Annotated[
+        str | None,
+        typer.Option(
+            "--unseal-reason",
+            help="Run a sealed segment again with a different config. The reason is "
+            "recorded permanently and the report is marked as reusing the holdout.",
+        ),
+    ] = None,
 ) -> None:
-    """Run a backtest, write its HTML tearsheet, and log it to the registry."""
+    """Run a backtest, write its HTML tearsheet, and log it to the registry.
+
+    The same config is also run at each multiplier of its `cost_stress` (default 0x and
+    2x besides 1x) for the report's Cost sensitivity table.
+    """
     try:
         backtest_config = load_backtest_config(config_file)
     except ConfigError as exc:
@@ -423,13 +446,21 @@ def backtest_run(
         backtest_config = backtest_config.model_copy(update={"engine_core": engine_core})
         # The environment variable outranks the config, so set it for this run too.
         os.environ["QR_ENGINE_CORE"] = engine_core
-    outcome = execute(
-        backtest_config,
-        data_dir=data_dir,
-        reports_dir=reports_dir,
-        universe_config=config,
-        notes=notes,
-    )
+    try:
+        outcome = execute(
+            backtest_config,
+            data_dir=data_dir,
+            reports_dir=reports_dir,
+            universe_config=config,
+            notes=notes,
+            cost_stress=not no_cost_stress,
+            unseal_reason=unseal_reason,
+        )
+    except (HoldoutError, ConfigError) as exc:
+        raise _fail(str(exc)) from exc
+    if outcome.sealed is not None:
+        _print_sealed(outcome.sealed)
+        return
     if outcome.error is not None or outcome.result is None:
         console.print(f"Logged as failed run {outcome.record.run_id}.")
         raise _fail(str(outcome.error).strip("'\""))
@@ -447,8 +478,78 @@ def backtest_run(
         if any(value is not None and not pd.isna(value) for value in values):
             table.add_row(label, *(format_metric(value, kind) for value in values))
     console.print(table)
+    if result.cost_sensitivity is not None:
+        console.print(f"Cost stress: {_stress_verdict(result.cost_sensitivity)}")
     console.print(f"Run id:  {outcome.record.run_id}")
     console.print(f"Report:  {outcome.record.report_path}")
+
+
+def _print_sealed(sealed: SealedResult) -> None:
+    """The stored result of a sealed segment, shown instead of running it again."""
+    console.print(
+        f"[yellow]Sealed segment already run[/yellow] for study {sealed.study_id} "
+        f"({sealed.split_name}/{sealed.segment}) on {sealed.sealed_at:%Y-%m-%d %H:%M} UTC, "
+        f"run {sealed.run_id}, with this same config. Showing the stored result; nothing "
+        "was run."
+    )
+    table = Table(title="Sealed result (after costs)", show_header=False)
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for key, label, kind in METRIC_ROWS:
+        value = sealed.metrics.get(key)
+        if value is not None:
+            table.add_row(label, format_metric(value, kind))
+    console.print(table)
+
+
+def _stress_verdict(sensitivity: CostSensitivity) -> str:
+    """One line: break-even multiplier and the fragile flag."""
+    found = sensitivity.break_even
+    flag = {
+        True: "[red]fragile[/red] (Sharpe at 2x below 0 or below half of 1x)",
+        False: "[green]not fragile[/green]",
+        None: "fragility not determined (needs 1x and 2x)",
+    }[sensitivity.fragile]
+    return f"break-even {found.describe() if found else '-'}; {flag}"
+
+
+def _print_assumptions(raw: object) -> None:
+    """The Assumptions section of a run, from its registry JSON."""
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        console.print("Assumptions: not recorded (run from before they were).")
+        return
+    assumptions = json.loads(str(raw))
+    for warning in assumptions.get("warnings", []):
+        console.print(f"[yellow]warning:[/yellow] {warning}")
+    for title, items in assumptions.get("sections", {}).items():
+        table = Table(title=f"Assumptions: {title}", show_header=False)
+        table.add_column("item")
+        table.add_column("assumption", overflow="fold")
+        for key, value in items.items():
+            table.add_row(str(key), str(value))
+        console.print(table)
+
+
+def _print_sensitivity(raw: object) -> None:
+    """The Cost sensitivity table of a run, from its registry JSON."""
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        console.print("Cost sensitivity: not recorded (no stress runs for this run).")
+        return
+    sensitivity = CostSensitivity.from_dict(json.loads(str(raw)))
+    table = Table(title="Cost sensitivity")
+    for column in ("costs", "CAGR", "Sharpe", "max drawdown", "turnover", "costs paid"):
+        table.add_column(column, justify="left" if column == "costs" else "right")
+    for point in sensitivity.points:
+        table.add_row(
+            f"{point.multiplier:g}x",
+            format_metric(point.cagr, "pct"),
+            format_metric(point.sharpe, "num"),
+            format_metric(point.max_drawdown, "pct"),
+            format_metric(point.turnover, "num"),
+            format_metric(point.costs_paid, "money"),
+        )
+    console.print(table)
+    console.print(f"Cost stress: {_stress_verdict(sensitivity)}")
 
 
 @backtest_app.command("list")
@@ -517,6 +618,10 @@ def backtest_show(
         ("status", f"[{status_colour}]{run['status']}[/{status_colour}]"),
         ("created (UTC)", _run_date(run["created_at"])),
         ("period", f"{_date(run['start_date'])} to {_date(run['end_date'])}"),
+        ("result", _shown(run["result_label"], "not recorded")),
+        ("split / segment", f"{_shown(run['split_name'], '-')} / {_shown(run['segment'], '-')}"),
+        ("study", _shown(run["study_id"], "-")),
+        ("holdout reused", _shown(run["unseal_reason"], "no")),
         ("config hash", run["config_hash"]),
         ("report", _shown(run["report_path"], "none")),
         ("notes", _shown(run["notes"], "")),
@@ -572,6 +677,9 @@ def backtest_show(
         for symbol, digest in sorted(hashes.items()):
             per_symbol.add_row(symbol, digest)
         console.print(per_symbol)
+
+    _print_sensitivity(run["cost_sensitivity_json"])
+    _print_assumptions(run["assumptions_json"])
 
     console.print("[bold]Config (resolved)[/bold]")
     console.print_json(str(run["config_json"]))
@@ -637,6 +745,146 @@ def backtest_compare(
     for run in chosen:
         if run["report_path"]:
             console.print(f"{run['run_id']}: {run['report_path']}")
+
+
+@backtest_app.command("walkforward")
+def backtest_walkforward(
+    config_file: Annotated[Path, typer.Argument(help="Backtest config (YAML).")],
+    split: Annotated[
+        str | None,
+        typer.Option("--split", help="Split name or file (default: the config's split)."),
+    ] = None,
+    mode: Annotated[str, typer.Option("--mode", help="anchored | rolling.")] = "anchored",
+    train_years: Annotated[int, typer.Option("--train-years")] = 5,
+    test_months: Annotated[int, typer.Option("--test-months")] = 12,
+    step_months: Annotated[int, typer.Option("--step-months")] = 12,
+    grid: Annotated[
+        Path | None,
+        typer.Option("--grid", help="YAML mapping of parameter -> list of values to try."),
+    ] = None,
+    embargo_days: Annotated[
+        int | None,
+        typer.Option("--embargo-days", help="Gap before each test window (default: split's)."),
+    ] = None,
+    config: ConfigOption = None,
+    data_dir: DataDirOption = None,
+    reports_dir: ReportsDirOption = None,
+) -> None:
+    """Walk-forward: choose parameters on each train window, test them on the next one.
+
+    Uses only the split's unsealed segments. Every backtest is logged to the registry
+    under one walk-forward id; the report shows each fold's choice and the stitched
+    out-of-sample curve.
+    """
+    from qr.research.walkforward import walk_forward, write_walkforward_report
+
+    try:
+        backtest_config = load_backtest_config(config_file)
+        split_name = split or backtest_config.split
+        if split_name is None:
+            raise ConfigError("give --split, or set split in the config")
+        values = None
+        if grid is not None:
+            raw = yaml.safe_load(grid.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ConfigError(f"{grid}: expected a mapping of parameter -> values")
+            values = raw
+        result = walk_forward(
+            backtest_config, split_name, mode, train_years, test_months, step_months, values,
+            embargo_days=embargo_days, data_dir=data_dir, universe_config=config,
+        )  # fmt: skip
+    except (ConfigError, ValueError) as exc:
+        raise _fail(str(exc)) from exc
+    path = write_walkforward_report(result, reports_dir or DEFAULT_REPORTS_DIR)
+
+    table = Table(title=f"{backtest_config.name}: walk-forward ({mode})")
+    for column in ("fold", "train", "test", "chosen", "train Sharpe", "test Sharpe", "test CAGR"):
+        table.add_column(
+            column, justify="right" if "Sharpe" in column or "CAGR" in column else "left"
+        )
+    for fold in result.folds:
+        table.add_row(
+            str(fold.fold.index),
+            f"{fold.fold.train_start} to {fold.fold.train_end}",
+            f"{fold.fold.test_start} to {fold.fold.test_end}",
+            ", ".join(f"{k}={v}" for k, v in fold.chosen.items()) or "(config params)",
+            format_metric(fold.train_metrics.get("sharpe"), "num"),
+            format_metric(fold.test.metrics.get("sharpe"), "num"),
+            format_metric(fold.test.metrics.get("cagr"), "pct"),
+        )
+    console.print(table)
+    steps = max(len(result.folds) - 1, 0)
+    colour = "red" if result.unstable else "green"
+    console.print(
+        f"Chosen parameters changed in [{colour}]{result.changes} of {steps}[/{colour}] steps. "
+        f"Stitched out of sample: Sharpe {format_metric(result.metrics.get('sharpe'), 'num')}, "
+        f"CAGR {format_metric(result.metrics.get('cagr'), 'pct')}, max drawdown "
+        f"{format_metric(result.metrics.get('max_drawdown'), 'pct')}."
+    )
+    console.print(f"Runs logged: {result.runs_logged} (walk-forward id {result.walkforward_id})")
+    console.print(f"Report:  {path}")
+
+
+holdout_app = typer.Typer(help="Sealed test results, one per study.", no_args_is_help=True)
+app.add_typer(holdout_app, name="holdout")
+
+
+@holdout_app.command("list")
+def holdout_list(data_dir: DataDirOption = None) -> None:
+    """Every sealed result, and every recorded override."""
+    from qr.research import holdout
+
+    results = holdout.read_results(data_dir)
+    if results.empty:
+        console.print("No sealed results yet.")
+    else:
+        table = Table(title="Sealed results")
+        for column in ("study", "split / segment", "sealed at (UTC)", "run", "config hash",
+                       "Sharpe", "CAGR"):  # fmt: skip
+            table.add_column(column)
+        for row in results.itertuples():
+            metrics = json.loads(str(row.metrics_json))
+            table.add_row(
+                str(row.study_id),
+                f"{row.split_name} / {row.segment}",
+                _run_date(row.sealed_at),
+                str(row.run_id),
+                str(row.config_hash),
+                format_metric(metrics.get("sharpe"), "num"),
+                format_metric(metrics.get("cagr"), "pct"),
+            )
+        console.print(table)
+    overrides = holdout.read_overrides(data_dir)
+    if not overrides.empty:
+        table = Table(title="[red]Holdout overrides[/red] (sealed segments run again)")
+        for column in ("study", "split / segment", "when (UTC)", "run", "reason"):
+            table.add_column(column, overflow="fold")
+        for row in overrides.itertuples():
+            table.add_row(str(row.study_id), f"{row.split_name} / {row.segment}",
+                          _run_date(row.created_at), str(row.run_id), str(row.reason))  # fmt: skip
+        console.print(table)
+
+
+@holdout_app.command("import-pairs")
+def holdout_import_pairs(
+    path: Annotated[Path, typer.Argument(help="The pairs study's sealed results file.")] = Path(
+        "reports/pairs/test_results.json"
+    ),
+    data_dir: DataDirOption = None,
+) -> None:
+    """Copy the pairs study's sealed test results into the holdout table, without re-running."""
+    from qr.research.pairs import import_sealed_results
+
+    if not path.is_file():
+        raise _fail(f"sealed results file not found: {path}")
+    try:
+        imported = import_sealed_results(path, data_dir)
+    except ValueError as exc:
+        raise _fail(str(exc)) from exc
+    if imported:
+        console.print(f"Imported {len(imported)} sealed results: {', '.join(imported)}")
+    else:
+        console.print("Already imported; nothing changed.")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,9 @@
+# The pairs-trading study's periods (qr.research.pairs). Train and validation are
+# adjacent and the study had no embargo; the test was run once on 2026-10-14 and its
+# result is in holdout_results (`qr holdout import-pairs`).
+name: pairs_2010
+segments:
+  train:      { start: 2010-01-01, end: 2018-12-31 }
+  validation: { start: 2019-01-01, end: 2022-12-31 }
+  test:       { start: 2023-01-01, end: null, sealed: true }
+embargo_days: 0

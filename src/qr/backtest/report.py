@@ -317,6 +317,15 @@ th:first-child, td:first-child {{ text-align: left; }}
 th {{ color: {MUTED}; font-weight: 600; font-size: 12px; }}
 i.key {{ display: inline-block; width: 10px; height: 10px; border-radius: 2px;
   margin-right: 6px; }}
+ul.warnings {{ margin: 8px 0; padding: 10px 12px 10px 30px; border-radius: 8px;
+  background: #fdf3e7; border: 1px solid #f2cf9f; }}
+ul.warnings li {{ margin: 2px 0; }}
+.flag {{ font-weight: 600; color: {NEGATIVE}; }}
+.label {{ display: inline-block; padding: 1px 8px; border-radius: 10px;
+  background: {NEUTRAL}; font-size: 12px; font-weight: 600; }}
+.reused {{ margin: 12px 0; padding: 10px 12px; border-radius: 8px; color: #fff;
+  background: {NEGATIVE}; font-weight: 600; }}
+td.wrap {{ white-space: normal; text-align: left; }}
 pre {{ background: #f4f3f0; border-radius: 8px; padding: 12px; overflow-x: auto;
   font-size: 12px; }}
 """
@@ -366,6 +375,71 @@ def _cost_table(result: BacktestResult) -> str:
     ]
     body = "".join(f"<tr><td>{label}</td><td>{value}</td></tr>" for label, value in rows)
     return f"<table><tr><th>Before and after costs</th><th>USD</th></tr>{body}</table>"
+
+
+def _reused_banner(result: BacktestResult) -> str:
+    if result.holdout_reused is None:
+        return ""
+    return (
+        '<div class="reused">Holdout reused: this sealed segment was already run for '
+        f"study {html.escape(str(result.config.study_id))}, and was run again with a "
+        f"different config. Reason given: {html.escape(result.holdout_reused)}. This is no "
+        "longer an untouched test.</div>"
+    )
+
+
+def _assumptions_section(assumptions: Mapping[str, Any] | None) -> str:
+    if not assumptions:
+        return ""
+    warnings = "".join(f"<li>{html.escape(w)}</li>" for w in assumptions.get("warnings", []))
+    tables = []
+    for title, items in assumptions.get("sections", {}).items():
+        rows = "".join(
+            f'<tr><td>{html.escape(str(k))}</td><td class="wrap">{html.escape(str(v))}</td></tr>'
+            for k, v in items.items()
+        )
+        tables.append(
+            f"<h3>{html.escape(title)}</h3>"
+            f'<div class="scroll"><table><tr><th>Item</th><th>Assumption</th></tr>{rows}</table>'
+            "</div>"
+        )
+    return f"""<h2>Assumptions</h2>
+<p class="note">Generated from the resolved config and the code path that ran, so it
+describes exactly this run.</p>
+{f'<ul class="warnings">{warnings}</ul>' if warnings else ""}
+{"".join(tables)}"""
+
+
+def _sensitivity_section(result: BacktestResult) -> str:
+    sensitivity = result.cost_sensitivity
+    if sensitivity is None:
+        return ""
+    rows = "".join(
+        f"<tr><td>{p.multiplier:g}x{' (this run)' if p.multiplier == 1 else ''}</td>"
+        f"<td>{format_metric(p.cagr, 'pct')}</td><td>{format_metric(p.sharpe, 'num')}</td>"
+        f"<td>{format_metric(p.max_drawdown, 'pct')}</td>"
+        f"<td>{format_metric(p.turnover, 'num')}</td>"
+        f"<td>{format_metric(p.costs_paid, 'money')}</td></tr>"
+        for p in sensitivity.points
+    )
+    found = sensitivity.break_even
+    fragile = sensitivity.fragile
+    verdict = (
+        "not determined (needs the 1x and 2x points)"
+        if fragile is None
+        else '<span class="flag">fragile</span>: Sharpe at 2x costs is below zero or '
+        "below half the 1x Sharpe"
+        if fragile
+        else "not fragile: Sharpe at 2x costs keeps at least half the 1x Sharpe"
+    )
+    return f"""<h2>Cost sensitivity</h2>
+<p class="note">The same run with every cost (commission, spread, slippage, borrow) scaled
+by each multiplier. 0x is the run before costs.</p>
+<div class="scroll"><table><tr><th>Costs</th><th>CAGR</th><th>Sharpe</th>
+<th>Max drawdown</th><th>Turnover</th><th>Costs paid</th></tr>{rows}</table></div>
+<p>Break-even cost multiplier (after-cost CAGR reaches zero):
+<strong>{html.escape(found.describe()) if found else "-"}</strong></p>
+<p>Verdict: {verdict}</p>"""
 
 
 def _provenance_section(
@@ -451,7 +525,9 @@ def render_report(
 </head>
 <body><main>
 <h1>{html.escape(config.name)}</h1>
-<p class="sub">{html.escape(config.strategy)} · {config.engine} engine ·
+{_reused_banner(result)}
+<p class="sub"><span class="label">{html.escape(result.label)}</span> ·
+{html.escape(config.strategy)} · {config.engine} engine ·
 {sessions[0].date()} to {sessions[-1].date()} · {len(sessions):,} sessions ·
 starting cash {config.initial_cash:,.0f}</p>
 <div class="tiles">{tiles}</div>
@@ -460,12 +536,14 @@ under simplifying assumptions, not a forecast.</p>
 {figures}
 <h2>Before and after costs</h2>
 <div class="scroll">{_cost_table(result)}</div>
+{_sensitivity_section(result)}
 <h2>Metrics</h2>
 <div class="scroll">{_metrics_table(result)}</div>
 <p class="note">The Probabilistic Sharpe Ratio is the chance that the true Sharpe ratio is
 above zero given this one sample. It does not account for multiple testing: after trying
 many ideas, the best one looks good by luck. The registry keeps every run so that step 3
 can apply the Deflated Sharpe Ratio.</p>
+{_assumptions_section(result.assumptions)}
 <h2>Run</h2>
 <div class="scroll"><table><tr><th>Field</th><th>Value</th></tr>{meta_rows}</table></div>
 {_provenance_section(provenance, per_symbol)}

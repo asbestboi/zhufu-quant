@@ -12,6 +12,9 @@ symbol), the event engine with single orders, and both do the same arithmetic.
   where ``participation`` is the order's value divided by the average daily dollar volume.
 * **Borrow fee** = ``short value * borrow_rate * days / 360``, charged for every calendar
   day a short position is held.
+* **Cost multiplier**: ``multiplier`` scales every rate above (the commission cap and
+  minimum included), so each cost is exactly ``multiplier`` times its 1x amount on the
+  same trade. The participation cap is about liquidity, not cost, and is not scaled.
 * **Participation cap**: an order worth more than ``max_participation`` times the average
   daily dollar volume is cut down to that size, or refused, depending on the config.
 """
@@ -117,13 +120,34 @@ def resolve_params(config: CostConfig, symbol: str, asset_class: str) -> CostPar
     )
 
 
+def scale_params(params: CostParams, multiplier: float) -> CostParams:
+    """``params`` with every cost rate multiplied by ``multiplier``.
+
+    The commission cap is scaled with the rest. Leaving it alone would let the cap stop
+    the commission from growing, so costs would no longer scale linearly. "No cap" stays
+    no cap.
+    """
+    return replace(
+        params,
+        per_share=params.per_share * multiplier,
+        min_per_order=params.min_per_order * multiplier,
+        max_pct=params.max_pct if params.max_pct >= NO_CAP else params.max_pct * multiplier,
+        pct=params.pct * multiplier,
+        spread=params.spread * multiplier,
+        slippage=params.slippage * multiplier,
+        impact=params.impact * multiplier,
+        borrow_rate=params.borrow_rate * multiplier,
+    )
+
+
 class CostModel:
     """Costs for a fixed, ordered list of symbols.
 
     Array methods take and return one entry per symbol, in the order of ``symbols``; the
     ``order_*`` methods do the same arithmetic for a single order. With ``free=True``
     every cost is zero but the participation cap still applies: that is the "before
-    costs" run, which should differ from the real one by costs alone.
+    costs" run, which should differ from the real one by costs alone. ``multiplier``
+    scales every cost (see the module docstring); ``free`` wins over it.
     """
 
     def __init__(
@@ -133,14 +157,20 @@ class CostModel:
         asset_classes: Mapping[str, str] | None = None,
         *,
         free: bool = False,
+        multiplier: float = 1.0,
     ) -> None:
+        if multiplier < 0:
+            raise ValueError(f"cost multiplier must be zero or more, got {multiplier}")
         classes = asset_classes or {}
         self.symbols = list(symbols)
         self.adv_window = config.adv_window
         self.free = free
+        self.multiplier = multiplier
         self.params: dict[str, CostParams] = {}
         for symbol in self.symbols:
             params = resolve_params(config, symbol, classes.get(symbol, DEFAULT_ASSET_CLASS))
+            if multiplier != 1.0:  # skipped at 1x, so the usual run is bit-for-bit unchanged
+                params = scale_params(params, multiplier)
             if free:
                 params = replace(
                     params,
