@@ -24,7 +24,14 @@ DEFAULT_COST_STRESS = (0.0, 1.0, 2.0)
 
 # Options added after configs were first hashed, with the value that leaves a run as it
 # was. They are left out of the hash at that value, so older hashes still match.
-_HASH_NEUTRAL = {"cost_multiplier": 1.0}
+_HASH_NEUTRAL: dict[str, Any] = {
+    "cost_multiplier": 1.0,
+    "split": None,
+    "segment": None,
+    "study_id": None,
+    "evaluate_from": None,
+    "open_end": False,
+}
 # Options that change what is reported about a run, not the run itself.
 _NOT_HASHED = {"engine_core", "cost_stress"}
 
@@ -120,6 +127,17 @@ class BacktestConfig(_Model):
     # Multipliers of the config's costs that every run is also evaluated at (see
     # qr.backtest.stress). 1 is the run itself; an empty list turns the stress test off.
     cost_stress: list[float] = Field(default_factory=lambda: list(DEFAULT_COST_STRESS))
+    # A split from configs/splits and one of its segments; the loader fills start, end,
+    # evaluate_from, and open_end from them (see qr.research.splits).
+    split: str | None = None
+    segment: str | None = None
+    # The study the run belongs to: required on a sealed segment, counted in part 4.
+    study_id: str | None = None
+    # Metrics start here; the strategy still trades from `start` (a split's embargo).
+    evaluate_from: date | None = None
+    # The segment runs to the latest data: `end` is the day the run was made, and is
+    # left out of the hash so that the same experiment hashes the same on another day.
+    open_end: bool = False
 
     @model_validator(mode="after")
     def _check(self) -> BacktestConfig:
@@ -131,6 +149,12 @@ class BacktestConfig(_Model):
             repeated = sorted({s for s in self.universe if self.universe.count(s) > 1})
             if repeated:
                 raise ValueError(f"universe repeats symbols: {', '.join(repeated)}")
+        if self.evaluate_from is not None and not self.start <= self.evaluate_from <= self.end:
+            raise ValueError(
+                f"evaluate_from {self.evaluate_from} is outside {self.start} to {self.end}"
+            )
+        if (self.split is None) != (self.segment is None):
+            raise ValueError("give both split and segment, or neither")
         if any(m < 0 for m in self.cost_stress):
             raise ValueError("cost_stress multipliers must be zero or more")
         if len(set(self.cost_stress)) != len(self.cost_stress):
@@ -153,6 +177,8 @@ class BacktestConfig(_Model):
         for name, neutral in _HASH_NEUTRAL.items():
             if experiment.get(name) == neutral:
                 del experiment[name]
+        if self.open_end:
+            del experiment["end"]
         text = json.dumps(experiment, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
@@ -168,6 +194,12 @@ def load_backtest_config(path: Path | str) -> BacktestConfig:
         raise ConfigError(f"{resolved}: invalid YAML: {exc}") from exc
     if not isinstance(raw, dict):
         raise ConfigError(f"{resolved}: expected a mapping at the top level")
+    from qr.research.splits import apply_split  # here: qr.research imports this module
+
+    try:
+        raw = apply_split(raw)
+    except ConfigError as exc:
+        raise ConfigError(f"{resolved}: {exc}") from exc
     try:
         return BacktestConfig.model_validate(raw)
     except ValidationError as exc:
