@@ -105,6 +105,7 @@ def backtest_run(
         reports_dir=None,
         engine=engine,
         engine_core=engine_core,
+        no_cost_stress=False,
     )
     return Invocation(tuple(argv), "backtest_run", kwargs)
 

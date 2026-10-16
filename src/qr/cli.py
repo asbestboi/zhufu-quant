@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ from qr.backtest.provenance import per_symbol_hashes, verify_run
 from qr.backtest.registry import read_runs
 from qr.backtest.report import METRIC_ROWS, format_metric
 from qr.backtest.runner import execute
+from qr.backtest.stress import CostSensitivity
 from qr.config import (
     ConfigError,
     UniverseConfig,
@@ -407,8 +409,19 @@ def backtest_run(
             "and QR_ENGINE_CORE).",
         ),
     ] = None,
+    no_cost_stress: Annotated[
+        bool,
+        typer.Option(
+            "--no-cost-stress",
+            help="Skip the runs at the config's other cost multipliers (cost_stress).",
+        ),
+    ] = False,
 ) -> None:
-    """Run a backtest, write its HTML tearsheet, and log it to the registry."""
+    """Run a backtest, write its HTML tearsheet, and log it to the registry.
+
+    The same config is also run at each multiplier of its `cost_stress` (default 0x and
+    2x besides 1x) for the report's Cost sensitivity table.
+    """
     try:
         backtest_config = load_backtest_config(config_file)
     except ConfigError as exc:
@@ -429,6 +442,7 @@ def backtest_run(
         reports_dir=reports_dir,
         universe_config=config,
         notes=notes,
+        cost_stress=not no_cost_stress,
     )
     if outcome.error is not None or outcome.result is None:
         console.print(f"Logged as failed run {outcome.record.run_id}.")
@@ -447,8 +461,60 @@ def backtest_run(
         if any(value is not None and not pd.isna(value) for value in values):
             table.add_row(label, *(format_metric(value, kind) for value in values))
     console.print(table)
+    if result.cost_sensitivity is not None:
+        console.print(f"Cost stress: {_stress_verdict(result.cost_sensitivity)}")
     console.print(f"Run id:  {outcome.record.run_id}")
     console.print(f"Report:  {outcome.record.report_path}")
+
+
+def _stress_verdict(sensitivity: CostSensitivity) -> str:
+    """One line: break-even multiplier and the fragile flag."""
+    found = sensitivity.break_even
+    flag = {
+        True: "[red]fragile[/red] (Sharpe at 2x below 0 or below half of 1x)",
+        False: "[green]not fragile[/green]",
+        None: "fragility not determined (needs 1x and 2x)",
+    }[sensitivity.fragile]
+    return f"break-even {found.describe() if found else '-'}; {flag}"
+
+
+def _print_assumptions(raw: object) -> None:
+    """The Assumptions section of a run, from its registry JSON."""
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        console.print("Assumptions: not recorded (run from before they were).")
+        return
+    assumptions = json.loads(str(raw))
+    for warning in assumptions.get("warnings", []):
+        console.print(f"[yellow]warning:[/yellow] {warning}")
+    for title, items in assumptions.get("sections", {}).items():
+        table = Table(title=f"Assumptions: {title}", show_header=False)
+        table.add_column("item")
+        table.add_column("assumption", overflow="fold")
+        for key, value in items.items():
+            table.add_row(str(key), str(value))
+        console.print(table)
+
+
+def _print_sensitivity(raw: object) -> None:
+    """The Cost sensitivity table of a run, from its registry JSON."""
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        console.print("Cost sensitivity: not recorded (no stress runs for this run).")
+        return
+    sensitivity = CostSensitivity.from_dict(json.loads(str(raw)))
+    table = Table(title="Cost sensitivity")
+    for column in ("costs", "CAGR", "Sharpe", "max drawdown", "turnover", "costs paid"):
+        table.add_column(column, justify="left" if column == "costs" else "right")
+    for point in sensitivity.points:
+        table.add_row(
+            f"{point.multiplier:g}x",
+            format_metric(point.cagr, "pct"),
+            format_metric(point.sharpe, "num"),
+            format_metric(point.max_drawdown, "pct"),
+            format_metric(point.turnover, "num"),
+            format_metric(point.costs_paid, "money"),
+        )
+    console.print(table)
+    console.print(f"Cost stress: {_stress_verdict(sensitivity)}")
 
 
 @backtest_app.command("list")
@@ -572,6 +638,9 @@ def backtest_show(
         for symbol, digest in sorted(hashes.items()):
             per_symbol.add_row(symbol, digest)
         console.print(per_symbol)
+
+    _print_sensitivity(run["cost_sensitivity_json"])
+    _print_assumptions(run["assumptions_json"])
 
     console.print("[bold]Config (resolved)[/bold]")
     console.print_json(str(run["config_json"]))
