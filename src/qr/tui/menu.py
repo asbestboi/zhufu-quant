@@ -30,7 +30,7 @@ from rich.text import Text
 from qr.backtest.config import load_backtest_config
 from qr.backtest.registry import read_runs
 from qr.backtest.rust_core import rust_available
-from qr.backtest.strategies import STRATEGIES
+from qr.backtest.strategies import STRATEGIES, load_plugins
 from qr.config import ConfigError, UniverseConfig, config_path, data_dir, load_config
 from qr.tui import actions
 from qr.tui.actions import ALL, GROUP, PICK, Invocation, Scope
@@ -334,6 +334,7 @@ class Menu:
         path = labels[picked]
         config = load_backtest_config(path)
 
+        load_plugins()
         entry = STRATEGIES.get(config.strategy)
         implemented = (
             {} if entry is None else {"vectorized": entry.vectorized, "event": entry.event}
