@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
 from qr import storage
 from qr.backtest import provenance, registry
+from qr.backtest.assumptions import build_assumptions
 from qr.backtest.config import BacktestConfig
 from qr.backtest.costs import CostModel
 from qr.backtest.data import MarketData, load_market_data
@@ -25,7 +27,9 @@ from qr.backtest.report import write_report
 from qr.backtest.result import BacktestResult, EngineOutput
 from qr.backtest.strategies import build_strategy
 from qr.backtest.strategy import EventStrategy, WeightStrategy
+from qr.backtest.stress import CostSensitivity, StressPoint
 from qr.backtest.vectorized import run_vectorized
+from qr.config import db_path as storage_db_path
 from qr.config import universe_symbols
 from qr.fingerprint import DataFingerprint
 from qr.load import data_version, get_bars
@@ -52,7 +56,10 @@ def resolve_universe(
 
 
 def _simulate(config: BacktestConfig, data: MarketData, free: bool) -> EngineOutput:
-    costs = CostModel(config.costs, data.symbols, data.asset_classes, free=free)
+    costs = CostModel(
+        config.costs, data.symbols, data.asset_classes, free=free,
+        multiplier=config.cost_multiplier,
+    )  # fmt: skip
     # A fresh strategy per simulation: the two runs must not share any state.
     strategy = build_strategy(config.strategy, config.engine, config.params)
     if config.engine == "vectorized":
@@ -83,11 +90,18 @@ def run_backtest(
     *,
     data_dir: Path | str | None = None,
     universe_config: Path | str | None = None,
+    cost_stress: bool = True,
+    engine_core: str | None = None,
 ) -> BacktestResult:
     """Run ``config`` with and without costs and compute the metrics of both.
 
     Data comes from the local store unless ``data`` is given (and, for the benchmark,
     ``benchmark_closes``: a date-indexed series of total-return closes).
+
+    Unless ``cost_stress`` is False, the run is also simulated at each multiplier of
+    ``config.cost_stress`` other than 1 (see :mod:`qr.backtest.stress`). The result
+    carries the run's assumptions either way; ``engine_core`` is the core that ran, for
+    them.
     """
     snapshot = None
     if data is None:
@@ -107,7 +121,7 @@ def run_backtest(
             benchmark_closes, pd.DatetimeIndex(net.equity.index), config.initial_cash
         )
     rate = config.risk_free_rate
-    return BacktestResult(
+    result = BacktestResult(
         config=config,
         net=net,
         gross=gross,
@@ -117,6 +131,38 @@ def run_backtest(
         benchmark_metrics=equity_metrics(benchmark, rate) if benchmark is not None else {},
         data_snapshot=snapshot,
     )
+    if cost_stress and config.cost_stress:
+        points = []
+        for multiplier in config.cost_stress:
+            if multiplier == 1.0:
+                metrics = result.metrics
+            else:
+                scaled = config.model_copy(
+                    update={"cost_multiplier": config.cost_multiplier * multiplier}
+                )
+                metrics = compute_metrics(_simulate(scaled, data, free=False), benchmark, rate)
+                result.stress_metrics[float(multiplier)] = metrics
+            points.append(StressPoint.from_metrics(multiplier, metrics))
+        result.cost_sensitivity = CostSensitivity.from_points(points)
+    sources = None
+    if snapshot is not None:  # read from the store: the instruments table knows sources
+        sources = data_sources(data.symbols, data_dir)
+    result.assumptions = build_assumptions(
+        config, data.symbols, data.asset_classes,
+        result=result, engine_core=engine_core, sources=sources,
+    )  # fmt: skip
+    return result
+
+
+def data_sources(symbols: list[str], data_dir: Path | str | None = None) -> dict[str, str]:
+    """The data source of each of ``symbols`` that the store knows."""
+    path = storage_db_path(data_dir)
+    if not path.exists():
+        return {}
+    with storage.connect(path, read_only=True) as con:
+        instruments = storage.read_instruments(con)
+    known = instruments[instruments["symbol"].isin(symbols)]
+    return dict(zip(known["symbol"], known["source"], strict=True))
 
 
 def _number(value: float | None) -> float | None:
@@ -158,12 +204,17 @@ def execute(
     reports_dir: Path | str | None = None,
     universe_config: Path | str | None = None,
     notes: str | None = None,
+    cost_stress: bool = True,
 ) -> RunOutcome:
     """Run ``config``, write its tearsheet, and log it to the registry.
 
     A run that raises is logged too, with status ``failed`` and the error as its notes,
     and the exception is returned in the outcome rather than raised: a failed idea is
     still an idea that was tried.
+
+    Each cost-stress run other than 1x is logged as a row of its own with
+    ``parent_run_id`` set to this run, and gets no tearsheet. ``cost_stress=False``
+    skips them.
     """
     created = storage.utcnow()
     run_id = registry.new_run_id(created)
@@ -179,7 +230,13 @@ def execute(
         data = provenance.run_fingerprint(
             provenance.data_symbols(config, universe), config.end, data_dir=data_dir
         )
-        result = run_backtest(config, data_dir=data_dir, universe_config=universe_config)
+        result = run_backtest(
+            config,
+            data_dir=data_dir,
+            universe_config=universe_config,
+            cost_stress=cost_stress,
+            engine_core=environment.engine_core,
+        )
         report = Path(reports_dir or DEFAULT_REPORTS_DIR) / f"{run_id}_{config.name}.html"
         write_report(
             result,
@@ -233,6 +290,53 @@ def execute(
         engine_core=environment.engine_core if environment else None,
         rust_core_version=environment.rust_core_version if environment else None,
         os=environment.os if environment else None,
+        cost_multiplier=config.cost_multiplier,
+        **_stress_columns(result if error is None else None),
     )
     registry.log_run(record, data_dir)
+    if error is None and result is not None:
+        for multiplier, stressed in result.stress_metrics.items():
+            registry.log_run(_stress_record(record, config, multiplier, stressed), data_dir)
     return RunOutcome(record=record, result=result if error is None else None, error=error)
+
+
+def _stress_columns(result: BacktestResult | None) -> dict[str, Any]:
+    """The registry columns a run gets from its assumptions and cost stress."""
+    if result is None:
+        return {}
+    sensitivity = result.cost_sensitivity
+    found = None if sensitivity is None else sensitivity.break_even
+    return {
+        "assumptions_json": None if result.assumptions is None else json.dumps(result.assumptions),
+        "cost_sensitivity_json": None if sensitivity is None else json.dumps(sensitivity.to_dict()),
+        "break_even_multiplier": None if found is None else found.multiplier,
+        "fragile": None if sensitivity is None else sensitivity.fragile,
+    }
+
+
+def _stress_record(
+    parent: registry.RunRecord,
+    config: BacktestConfig,
+    multiplier: float,
+    metrics: dict[str, float],
+) -> registry.RunRecord:
+    """The registry row of ``parent``'s stress run at ``multiplier``."""
+    scaled = config.model_copy(update={"cost_multiplier": config.cost_multiplier * multiplier})
+    return replace(
+        parent,
+        run_id=registry.stress_run_id(parent.run_id, multiplier),
+        config_json=scaled.to_json(),
+        config_hash=scaled.config_hash(),
+        sharpe=_number(metrics.get("sharpe")),
+        cagr=_number(metrics.get("cagr")),
+        max_drawdown=_number(metrics.get("max_drawdown")),
+        turnover=_number(metrics.get("turnover")),
+        report_path=None,
+        notes=f"cost stress {multiplier:g}x of {parent.run_id}",
+        parent_run_id=parent.run_id,
+        cost_multiplier=scaled.cost_multiplier,
+        assumptions_json=None,
+        cost_sensitivity_json=None,
+        break_even_multiplier=None,
+        fragile=None,
+    )

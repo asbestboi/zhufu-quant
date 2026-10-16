@@ -11,6 +11,7 @@ import pandas as pd
 
 from qr.backtest.account import AccountState, Position
 from qr.backtest.config import BacktestConfig
+from qr.backtest.stress import CostSensitivity
 
 ACCOUNT_COLUMNS = [
     "cash",
@@ -123,6 +124,11 @@ class BacktestResult:
     gross_metrics: dict[str, float] = field(default_factory=dict)
     benchmark_metrics: dict[str, float] = field(default_factory=dict)
     data_snapshot: datetime | None = None
+    # Filled by run_backtest: see qr.backtest.assumptions and qr.backtest.stress.
+    assumptions: dict[str, Any] | None = None
+    cost_sensitivity: CostSensitivity | None = None
+    # Metrics of each stress run other than 1x, by multiplier.
+    stress_metrics: dict[float, dict[str, float]] = field(default_factory=dict)
 
     @property
     def equity(self) -> pd.Series:
