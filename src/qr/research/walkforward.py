@@ -64,6 +64,12 @@ Candidate = tuple[dict[str, Any], Mapping[str, float]]
 Objective = Callable[[Sequence[Candidate]], int]
 
 
+def _risk_free_label(config: BacktestConfig) -> str:
+    from qr.backtest.runner import risk_free_label  # runner imports qr.research
+
+    return risk_free_label(config)
+
+
 def best_sharpe(candidates: Sequence[Candidate]) -> int:
     """The default objective: highest Sharpe after costs; NaN last; ties to the first."""
     best, best_value = 0, -math.inf
@@ -268,6 +274,7 @@ class _Logger:
                 cost_multiplier=config.cost_multiplier,
                 study_id=config.study_id,
                 result_label=label,
+                risk_free=_risk_free_label(config),
                 walkforward_id=self.walkforward_id,
                 fold=fold,
             ),
@@ -298,7 +305,11 @@ def walk_forward(
     candidate from ``(params, train metrics)`` pairs. ``embargo_days`` defaults to the
     split's. With ``log`` every backtest is written to the registry.
     """
-    from qr.backtest.runner import resolve_universe, run_backtest  # runner imports qr.research
+    from qr.backtest.runner import (  # runner imports qr.research
+        load_risk_free_returns,
+        resolve_universe,
+        run_backtest,
+    )
 
     split = load_split(split) if isinstance(split, str) else split
     start, end = split.unsealed_range()
@@ -327,7 +338,9 @@ def walk_forward(
         tried: list[Candidate] = []
         for params in candidates:
             window = _window_config(config, params, fold.train_start, fold.train_end)
-            outcome = run_backtest(window, train_data, train_bench, cost_stress=False)
+            outcome = run_backtest(
+                window, train_data, train_bench, cost_stress=False, data_dir=data_dir
+            )
             if logger:
                 logger.log(window, outcome, fold.index, IN_SAMPLE)
             tried.append((params, outcome.metrics))
@@ -335,7 +348,7 @@ def walk_forward(
         chosen, train_metrics = tried[pick]
         test_data, test_bench = market(fold.test_end)
         window = _window_config(config, chosen, fold.test_start, fold.test_end)
-        test = run_backtest(window, test_data, test_bench, cost_stress=False)
+        test = run_backtest(window, test_data, test_bench, cost_stress=False, data_dir=data_dir)
         test.label = WALK_FORWARD
         if logger:
             logger.log(window, test, fold.index, WALK_FORWARD)
@@ -346,7 +359,10 @@ def walk_forward(
     if all(r.test.benchmark is not None for r in results):
         curves = [r.test.benchmark for r in results if r.test.benchmark is not None]
         benchmark = _stitch(curves, config.initial_cash)
-    rate = config.risk_free_rate
+    # The stitched curve is measured against the same risk-free rate as every fold.
+    rate: float | pd.Series = config.risk_free_rate
+    if config.risk_free is not None:
+        rate = load_risk_free_returns(config, data_dir, end=folds[-1].test_end)
     return WalkForwardResult(
         walkforward_id=walkforward_id,
         config=config,
@@ -416,6 +432,8 @@ def render_walkforward(result: WalkForwardResult) -> str:
 step {result.step_months} months, embargo {result.embargo_days} days ·
 {len(result.folds)} folds · {result.runs_logged} runs logged as
 <code>{result.walkforward_id}</code></p>
+<p class="note">Risk-free rate for every Sharpe (the selection included):
+<strong>{html.escape(_risk_free_label(config))}</strong>.</p>
 <p class="note">Each fold chose its parameters on its train window only, then ran them
 once on the next window. Only the stitched test windows are out of sample. Sealed
 segments were not used.</p>

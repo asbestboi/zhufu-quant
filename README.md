@@ -551,6 +551,7 @@ execution: next_open        # next_open | next_close
 rebalance: daily            # daily | weekly | monthly | [2020-01-02, 2020-07-01]
 whole_shares: true          # event engine; false allows fractions (crypto)
 risk_free_rate: 0.0         # annual, for Sharpe, Sortino, and alpha
+# risk_free: { symbol: SHY } # instead: a symbol's daily total return (see Risk-free rate)
 lookahead_checks: 3         # vectorized engine; 0 switches the check off
 notes: ""
 costs:
@@ -796,6 +797,25 @@ treated as independent (correlated trials overstate `N`, so DSR errs on the low 
 and `V` is estimated from the trials themselves. DSR is shown next to Sharpe and PSR in
 sweep reports (for the best trial), in the tearsheet of any run in a study, and in
 `qr backtest show`.
+
+### Risk-free rate
+
+Sharpe, Sortino, PSR, alpha, and so the DSR and the fragile flag, are computed on returns
+in excess of a risk-free rate. By default that is the constant `risk_free_rate` (annual,
+0 unless set), exactly as before. Instead, a config can name a symbol whose **daily
+total return** (dividends included) is the risk-free return of each day:
+
+```yaml
+risk_free: { symbol: SHY }   # e.g. a 1-3 year Treasury ETF; not together with risk_free_rate
+```
+
+The series is read from the store up to the run's end date, like every other input. It
+must cover every evaluated day; a missing day is an error, not a silent zero. It is used
+for the strategy, the benchmark, every cost-stress point, the return moments behind the
+DSR, sweep trials, and walk-forward selection, where each fold reads it only up to that
+window's end. CAGR, drawdowns, and other non-excess numbers are unchanged. Every report
+states the rate it used: the tearsheet (and its Assumptions), the sweep and walk-forward
+reports, `qr backtest run` and `show`, and the registry's `risk_free` column.
 
 ### Data hashes and provenance
 
@@ -1241,6 +1261,16 @@ pass than real trading.
   holds DuckDB's threads can deadlock, and spawn is what Windows uses anyway.
 - **Trials are not cached across processes**: each loads its data from the store, only
   up to the segment's end, exactly as a single run does.
+
+### Risk-free series
+
+- **A missing risk-free day is an error.** Filling it with zero would quietly raise the
+  excess return on that day.
+- **`risk_free_rate` and `risk_free` cannot both be set**, so a report can never be
+  ambiguous about which one was used.
+- **`risk_free` is left out of the config hash while unset**, and the constant path runs
+  the same arithmetic as before, so every existing result and hash is unchanged
+  (checked on the reference backtests).
 
 ## Rust core
 

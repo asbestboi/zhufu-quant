@@ -21,7 +21,7 @@ from qr.backtest.config import load_backtest_config
 from qr.backtest.provenance import per_symbol_hashes, verify_run
 from qr.backtest.registry import read_runs
 from qr.backtest.report import METRIC_ROWS, format_metric
-from qr.backtest.runner import DEFAULT_REPORTS_DIR, execute
+from qr.backtest.runner import DEFAULT_REPORTS_DIR, execute, risk_free_label
 from qr.backtest.stress import CostSensitivity
 from qr.config import (
     ConfigError,
@@ -487,6 +487,7 @@ def backtest_run(
         if any(value is not None and not pd.isna(value) for value in values):
             table.add_row(label, *(format_metric(value, kind) for value in values))
     console.print(table)
+    console.print(f"Risk-free rate: {risk_free_label(backtest_config)}")
     if result.cost_sensitivity is not None:
         console.print(f"Cost stress: {_stress_verdict(result.cost_sensitivity)}")
     console.print(f"Run id:  {outcome.record.run_id}")
@@ -630,6 +631,7 @@ def backtest_show(
         ("result", _shown(run["result_label"], "not recorded")),
         ("split / segment", f"{_shown(run['split_name'], '-')} / {_shown(run['segment'], '-')}"),
         ("study", _shown(run["study_id"], "-")),
+        ("risk-free rate", _shown(run["risk_free"])),
         ("holdout reused", _shown(run["unseal_reason"], "no")),
         ("config hash", run["config_hash"]),
         ("report", _shown(run["report_path"], "none")),
@@ -840,6 +842,7 @@ def backtest_walkforward(
         f"CAGR {format_metric(result.metrics.get('cagr'), 'pct')}, max drawdown "
         f"{format_metric(result.metrics.get('max_drawdown'), 'pct')}."
     )
+    console.print(f"Risk-free rate: {risk_free_label(backtest_config)}")
     console.print(f"Runs logged: {result.runs_logged} (walk-forward id {result.walkforward_id})")
     console.print(f"Report:  {path}")
 
@@ -995,6 +998,9 @@ def _print_sweep(summary: SweepSummary) -> None:
         f"[bold]Trials in study {sweep['study_id']}: {summary.n_trials}[/bold] "
         "(every sweep, failed trials, and single runs)"
     )
+    from qr.research.sweeps import risk_free_of
+
+    console.print(f"Risk-free rate: {risk_free_of(summary)}")
     found = summary.deflated
     if found is not None and summary.best_index is not None:
         console.print(

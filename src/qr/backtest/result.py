@@ -161,6 +161,16 @@ class BacktestResult:
     study_trials: int | None = None
     # ... and the Deflated Sharpe Ratio against all of them (qr.research.deflated).
     deflated: Any = None
+    # The daily risk-free returns every metric used, when the config names a symbol
+    # (``risk_free``); None means the constant ``risk_free_rate``.
+    risk_free_returns: pd.Series | None = None
+
+    @property
+    def risk_free(self) -> float | pd.Series:
+        """The risk-free rate as the metric functions take it."""
+        if self.risk_free_returns is not None:
+            return self.risk_free_returns
+        return self.config.risk_free_rate
 
     @property
     def equity(self) -> pd.Series:

@@ -71,6 +71,8 @@ MIGRATIONS = [
     "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS n_returns INTEGER",
     "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS return_skew DOUBLE",
     "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS return_kurtosis DOUBLE",
+    # Which risk-free rate the metrics used, e.g. "constant 0.00% a year".
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS risk_free TEXT",
 ]
 
 COLUMNS = [
@@ -122,6 +124,7 @@ COLUMNS = [
     "n_returns",
     "return_skew",
     "return_kurtosis",
+    "risk_free",
 ]
 
 OK = "ok"
@@ -181,6 +184,7 @@ class RunRecord:
     n_returns: int | None = None
     return_skew: float | None = None
     return_kurtosis: float | None = None
+    risk_free: str | None = None  # the risk-free rate the metrics used
 
 
 def record_from_row(row: pd.Series) -> RunRecord:

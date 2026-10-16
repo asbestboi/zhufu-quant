@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,7 @@ from qr.backtest.config import BacktestConfig
 from qr.backtest.costs import CostModel
 from qr.backtest.data import MarketData, load_market_data
 from qr.backtest.event_engine import run_event
-from qr.backtest.metrics import compute_metrics, equity_metrics
+from qr.backtest.metrics import RiskFree, compute_metrics, equity_metrics, excess_over
 from qr.backtest.report import write_report
 from qr.backtest.result import BacktestResult, EngineOutput
 from qr.backtest.strategies import build_strategy
@@ -114,6 +115,7 @@ def run_backtest(
     universe_config: Path | str | None = None,
     cost_stress: bool = True,
     engine_core: str | None = None,
+    risk_free_returns: pd.Series | None = None,
 ) -> BacktestResult:
     """Run ``config`` with and without costs and compute the metrics of both.
 
@@ -124,6 +126,10 @@ def run_backtest(
     ``config.cost_stress`` other than 1 (see :mod:`qr.backtest.stress`). The result
     carries the run's assumptions either way; ``engine_core`` is the core that ran, for
     them.
+
+    With ``config.risk_free`` set, its symbol's daily total return is the risk-free rate
+    of every metric; it is read from the store up to ``config.end`` unless
+    ``risk_free_returns`` gives the series (dated daily returns).
     """
     snapshot = None
     if data is None:
@@ -142,7 +148,11 @@ def run_backtest(
         benchmark = benchmark_curve(
             benchmark_closes, pd.DatetimeIndex(net.equity.index), config.initial_cash
         )
-    rate = config.risk_free_rate
+    rate: RiskFree = config.risk_free_rate
+    if config.risk_free is not None:
+        if risk_free_returns is None:
+            risk_free_returns = load_risk_free_returns(config, data_dir)
+        rate = risk_free_returns
     result = BacktestResult(
         config=config,
         net=net,
@@ -153,6 +163,7 @@ def run_backtest(
         benchmark_metrics=equity_metrics(benchmark, rate) if benchmark is not None else {},
         data_snapshot=snapshot,
         label=result_label(config),
+        risk_free_returns=risk_free_returns if config.risk_free is not None else None,
     )
     if cost_stress and config.cost_stress:
         points = []
@@ -364,6 +375,7 @@ def execute(
         study_id=config.study_id,
         result_label=result_label(config),
         unseal_reason=reused,
+        risk_free=risk_free_label(config),
         **_moment_columns(result if error is None else None),
     )
     registry.log_run(record, data_dir)
@@ -386,9 +398,35 @@ def execute(
 
 
 def excess_returns(result: BacktestResult) -> pd.Series:
-    """Daily returns after costs, less the config's risk-free rate."""
+    """Daily returns after costs, less the run's risk-free rate (constant or series)."""
     returns = result.equity.pct_change().iloc[1:]
+    if result.risk_free_returns is not None:
+        return excess_over(returns, result.risk_free_returns)
     return returns - result.config.risk_free_rate / 252
+
+
+def load_risk_free_returns(
+    config: BacktestConfig, data_dir: Path | str | None = None, end: date | None = None
+) -> pd.Series:
+    """Daily total returns of ``config.risk_free``'s symbol, up to ``end`` (or the config's).
+
+    Nothing after the end is read, as for every other input of a run.
+    """
+    if config.risk_free is None:
+        raise ValueError("the config has no risk_free symbol")
+    symbol = config.risk_free.symbol
+    bars = get_bars(symbol, end=end or config.end, adjustment="total_return", data_dir=data_dir)
+    if bars.empty:
+        raise ValueError(f"no bars stored for the risk-free symbol {symbol}")
+    closes = bars["close"].droplevel("symbol")
+    return closes.pct_change().iloc[1:].rename(f"risk_free_{symbol}")
+
+
+def risk_free_label(config: BacktestConfig) -> str:
+    """Which risk-free rate a run of ``config`` uses, for reports."""
+    if config.risk_free is not None:
+        return f"{config.risk_free.symbol} daily total return"
+    return f"constant {config.risk_free_rate:.2%} a year"
 
 
 def _moment_columns(result: BacktestResult | None) -> dict[str, Any]:

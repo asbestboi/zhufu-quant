@@ -256,7 +256,7 @@ def _line_chart(title: str, lines: list[tuple[str, pd.Series, str]], percent: bo
 
 def rolling_charts(result: BacktestResult) -> list[str]:
     """Rolling one-year Sharpe ratio and volatility, one chart each (never a shared axis)."""
-    rate = result.config.risk_free_rate / m.PERIODS_PER_YEAR
+    rate = result.risk_free
     pairs = [("After costs", m.daily_returns(result.equity), NET)]
     if result.benchmark is not None:
         name = f"Benchmark ({result.config.benchmark})"
@@ -266,7 +266,7 @@ def rolling_charts(result: BacktestResult) -> list[str]:
     return [
         _line_chart(
             "Rolling one-year Sharpe ratio",
-            [(n, m.rolling_sharpe(r - rate), c) for n, r, c in pairs],
+            [(n, m.rolling_sharpe(m.excess_over(r, rate)), c) for n, r, c in pairs],
             percent=False,
         ),
         _line_chart(
@@ -375,6 +375,12 @@ def _cost_table(result: BacktestResult) -> str:
     ]
     body = "".join(f"<tr><td>{label}</td><td>{value}</td></tr>" for label, value in rows)
     return f"<table><tr><th>Before and after costs</th><th>USD</th></tr>{body}</table>"
+
+
+def _risk_free_text(config: Any) -> str:
+    if config.risk_free is not None:
+        return f"{config.risk_free.symbol} daily total return"
+    return f"constant {config.risk_free_rate:.2%} a year"
 
 
 def _study_tiles(result: BacktestResult) -> list[str]:
@@ -561,6 +567,8 @@ under simplifying assumptions, not a forecast.</p>
 {_sensitivity_section(result)}
 <h2>Metrics</h2>
 <div class="scroll">{_metrics_table(result)}</div>
+<p class="note">Risk-free rate for Sharpe, Sortino, PSR, and alpha:
+<strong>{html.escape(_risk_free_text(config))}</strong>.</p>
 <p class="note">The Probabilistic Sharpe Ratio is the chance that the true Sharpe ratio is
 above zero given this one sample. It does not account for multiple testing: after trying
 many ideas, the best one looks good by luck. For a run in a study, the Deflated Sharpe

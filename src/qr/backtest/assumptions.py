@@ -124,6 +124,15 @@ def _limits(config: BacktestConfig) -> dict[str, str]:
     }
 
 
+def _risk_free(config: BacktestConfig) -> str:
+    if config.risk_free is not None:
+        return (
+            f"{config.risk_free.symbol} daily total return (dividends included), for Sharpe, "
+            "Sortino, PSR, alpha, DSR, and the fragile flag"
+        )
+    return f"constant {config.risk_free_rate:.2%} a year"
+
+
 def _sent_limit_orders(result: BacktestResult | None) -> bool:
     orders = None if result is None else result.net.orders
     return orders is not None and len(orders) > 0 and bool((orders["type"] == "limit").any())
@@ -178,6 +187,7 @@ def build_assumptions(
             "As of": "the store when the run started",
             "Source": ", ".join(sorted(set((sources or {}).values()))) or "not recorded",
             "Universe": f"{len(symbols)} symbols: {', '.join(symbols)}",
+            "Risk-free rate": _risk_free(config),
         },
     }
     # Symbols whose costs differ from the base, so a reader sees every number used.
