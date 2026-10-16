@@ -291,7 +291,7 @@ def _log(
     data_dir: Path | str | None,
     universe_config: Path | str | None,
 ) -> None:
-    from qr.backtest.runner import resolve_universe, result_label
+    from qr.backtest.runner import resolve_universe, result_label, risk_free_label
 
     base = sweep.base
     commit, dirty = registry.git_state()
@@ -350,6 +350,7 @@ def _log(
                 trial_index=outcome.index,
                 params_json=json.dumps(outcome.params, sort_keys=True),
                 trial_seed=outcome.seed,
+                risk_free=risk_free_label(config),
                 n_returns=None if moments is None else moments[0],
                 return_skew=None
                 if moments is None or not math.isfinite(moments[1])
@@ -568,6 +569,8 @@ def render_sweep(summary: SweepSummary) -> str:
 · {escape(str(sweep["kind"]))} · {len(summary.trials)} trials ({failed} failed) ·
 <code>{escape(str(sweep["sweep_id"]))}</code></p>
 <div class="tiles">{tiles}</div>
+<p class="note">Risk-free rate for every Sharpe and the DSR:
+<strong>{escape(risk_free_of(summary))}</strong>.</p>
 <p class="note">The best of many trials looks good by luck alone. Count every trial: the
 study's total is what the Deflated Sharpe Ratio uses. DSR is the probability that the
 best trial's true Sharpe is above what that many worthless trials would reach by luck.</p>
@@ -580,6 +583,12 @@ best trial's true Sharpe is above what that many worthless trials would reach by
 </main></body>
 </html>
 """
+
+
+def risk_free_of(summary: SweepSummary) -> str:
+    """The risk-free rate(s) the sweep's trials were measured with."""
+    labels = {str(v) for v in summary.trials.get("risk_free", pd.Series(dtype=object)).dropna()}
+    return ", ".join(sorted(labels)) or "not recorded"
 
 
 def _float(value: Any) -> float:
