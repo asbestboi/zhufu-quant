@@ -55,6 +55,14 @@ MIGRATIONS = [
     "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS cost_sensitivity_json TEXT",
     "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS break_even_multiplier DOUBLE",
     "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS fragile BOOLEAN",
+    # Splits, sealed holdouts, and walk-forward (part 3).
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS split_name TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS segment TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS study_id TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS result_label TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS walkforward_id TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS fold INTEGER",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS unseal_reason TEXT",
 ]
 
 COLUMNS = [
@@ -92,6 +100,13 @@ COLUMNS = [
     "cost_sensitivity_json",
     "break_even_multiplier",
     "fragile",
+    "split_name",
+    "segment",
+    "study_id",
+    "result_label",
+    "walkforward_id",
+    "fold",
+    "unseal_reason",
 ]
 
 OK = "ok"
@@ -136,6 +151,31 @@ class RunRecord:
     cost_sensitivity_json: str | None = None
     break_even_multiplier: float | None = None  # None when outside the tested range
     fragile: bool | None = None
+    split_name: str | None = None
+    segment: str | None = None
+    study_id: str | None = None
+    result_label: str | None = None  # in-sample | validation | walk-forward | sealed test
+    walkforward_id: str | None = None  # set on the runs a walk-forward made
+    fold: int | None = None
+    unseal_reason: str | None = None  # set when a sealed segment was run again anyway
+
+
+def record_from_row(row: pd.Series) -> RunRecord:
+    """A :class:`RunRecord` from a row of :func:`read_runs` (missing values become None)."""
+
+    def clean(value: object) -> object:
+        if value is None or (not isinstance(value, str) and pd.isna(value)):  # type: ignore[call-overload]
+            return None
+        if isinstance(value, pd.Timestamp):
+            return value.to_pydatetime()
+        return value.item() if hasattr(value, "item") else value
+
+    values = {column: clean(row[column]) for column in COLUMNS}
+    for column in ("start_date", "end_date"):
+        found = values[column]
+        if isinstance(found, datetime):
+            values[column] = found.date()
+    return RunRecord(**values)  # type: ignore[arg-type]
 
 
 def registry_path(data_directory: Path | str | None = None) -> Path:
@@ -195,12 +235,14 @@ def read_runs(
     limit: int | None = None,
     *,
     include_stress: bool = False,
+    include_walkforward: bool = False,
 ) -> pd.DataFrame:
     """Logged runs, newest first; empty (with the right columns) when nothing is logged.
 
     ``run_ids`` may be abbreviated: any unique prefix of a run id matches. A registry
     written before a column existed reads that column as missing values. Cost-stress
-    runs are left out unless ``include_stress`` (see :func:`read_stress_runs`).
+    runs are left out unless ``include_stress`` (see :func:`read_stress_runs`), and the
+    runs a walk-forward made unless ``include_walkforward``.
     """
     path = registry_path(data_directory)
     if not path.exists():
@@ -209,6 +251,8 @@ def read_runs(
     params: list[object] = []
     if not include_stress and _has_column(path, "parent_run_id"):
         query += " AND parent_run_id IS NULL"
+    if not include_walkforward and _has_column(path, "walkforward_id"):
+        query += " AND walkforward_id IS NULL"
     if strategy is not None:
         query += " AND strategy = ?"
         params.append(strategy)
