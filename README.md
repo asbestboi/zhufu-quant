@@ -73,7 +73,7 @@ Your own strategy configs and notebooks can go in `configs/private/` and
 | `qr crosscheck [--symbols X,Y \| --universe NAME] [--days 365]` | Compare stored closes and splits with a second source (Tiingo). See [Cross-checking](#cross-checking-against-a-second-source). |
 | `qr export SYMBOL --out f.csv [--adjustment none\|split\|total_return]` | Dump bars to CSV (total-return adjusted by default). |
 | `qr snapshots backfill` | Hash raw snapshot files written before the snapshot manifest existed and add them to it. Files already listed are skipped, so it is safe to repeat. |
-| `qr backtest run CONFIG.yaml [--notes TEXT] [--reports-dir DIR] [--engine vectorized\|event] [--engine-core python\|rust]` | Run a backtest, write its HTML tearsheet, log it to the registry. `--engine` and `--engine-core` override the config for this run. Exits non-zero (and logs the run as failed) if it could not run. |
+| `qr backtest run CONFIG.yaml [--notes TEXT] [--reports-dir DIR] [--engine vectorized\|event] [--engine-core python\|rust] [--no-cost-stress]` | Run a backtest, write its HTML tearsheet, log it to the registry. `--engine` and `--engine-core` override the config for this run. Also runs the config at 0x and 2x costs for the [cost stress test](#assumptions-and-cost-stress) unless `--no-cost-stress`. Exits non-zero (and logs the run as failed) if it could not run. |
 | `qr backtest list [--strategy NAME] [--limit 20]` | Recent runs from the registry. |
 | `qr backtest compare RUN_ID RUN_ID ...` | Side-by-side metrics of logged runs; unique id prefixes are enough. |
 | `qr backtest show RUN_ID` | One run in full: the resolved config (every default filled in), its provenance (data hash, per-symbol hashes, environment), and its metrics. |
@@ -587,6 +587,47 @@ work: the number of things tried is exactly what an honest significance test nee
 New columns are added to an existing registry by `ALTER TABLE ... ADD COLUMN` on the next
 run; older rows keep empty values there and still list, show, and compare.
 
+### Assumptions and cost stress
+
+Every tearsheet, and `qr backtest show`, has two sections that say how far to trust the
+numbers.
+
+**Assumptions** lists what the result depends on: engine and core, execution timing
+(*signal at the close of t, filled at the open of t+1*), which price fills use, every
+cost number (with per-asset-class or per-symbol overrides), the participation cap,
+borrow rate, rebalance schedule, share rounding, how dividends and splits are applied,
+long-only and leverage limits, and the data's adjustment, `as_of`, and source. It is
+generated from the resolved config and the code path that ran, never written by hand, so
+it cannot go stale. It also raises **warnings** automatically:
+
+- hand-picked universe (survivorship bias), on every run;
+- limit orders filled from daily bars (the order of prices within a day is unknown);
+- fewer than 30 trades;
+- a period shorter than 3 years.
+
+**Cost sensitivity** reruns the same config with every cost (commission, spread,
+slippage and impact, borrow) multiplied by each value of `cost_stress`, by default
+`[0, 1, 2]`. 0x equals the "before costs" numbers and 1x is the run itself. The table
+shows CAGR, Sharpe, max drawdown, turnover, and costs paid at each multiplier, plus:
+
+- **Break-even cost multiplier**: where after-cost CAGR reaches zero, interpolated
+  linearly between stress points. It reads "above 2x" when the strategy is still
+  profitable at the highest multiplier, and "none" when it loses money even before costs.
+- **Fragile**: Sharpe at 2x is below zero or below half the 1x Sharpe. A strategy that
+  only works if costs are exactly as assumed is fragile.
+
+```yaml
+cost_stress: [0, 1, 2, 3]   # any multipliers; [] turns it off
+cost_multiplier: 1.0        # scales the config's costs for the run itself
+```
+
+Stress runs are stored in the registry as rows of their own, with `parent_run_id`
+pointing at the run they stress and `cost_multiplier` set. They get no HTML report, and
+`qr backtest list` and `registry.read_runs()` leave them out, so the run list stays one
+row per experiment (`read_runs(include_stress=True)` and `registry.read_stress_runs(id)`
+fetch them). The parent row stores the assumptions, the sensitivity table,
+`break_even_multiplier`, and `fragile`. Use `--no-cost-stress` to skip the extra runs.
+
 ### Data hashes and provenance
 
 Every run records which data and which environment produced it, in the registry, in
@@ -952,6 +993,33 @@ pass than real trading.
   directory, so it describes the code that actually ran.
 - **One existing test was edited**: `test_init_schema_is_repeatable` lists every table by
   name, so it now includes `snapshot_manifest`. Nothing else about it changed.
+
+### Research discipline: assumptions and cost stress (part 2)
+
+- **The multiplier scales the cost parameters, not the cost totals.** Every rate
+  (per-share, percent, minimum and cap of the commission, spread, slippage, impact,
+  borrow) is multiplied once when the cost model is built. Both engines and both cores
+  read those parameters, so one change covers all four paths, and every cost is exactly
+  linear in the multiplier. The commission cap is scaled too: leaving it alone would let
+  the cap absorb part of a 2x stress, which would understate it.
+- **The participation cap is not scaled.** It describes liquidity, not cost; the spec's
+  multiplier is about costs only.
+- **At 1x nothing is recomputed or rescaled**, so the run itself is bit-for-bit what it
+  was before this part (checked on every reference config). `cost_multiplier` is left
+  out of the config hash while it is 1, and `cost_stress` always, so existing hashes
+  still match.
+- **Stress multipliers are relative to the config's own costs**: with
+  `cost_multiplier: 1.5`, the "2x" stress run uses 3x the base numbers.
+- **An uncomputable Sharpe counts as fragile**, and a missing 1x or 2x point leaves the
+  flag undetermined rather than "not fragile".
+- **The survivorship warning is always shown.** Every universe here is a fixed list
+  chosen today, ETF lists included; the more conservative reading is to say so on
+  every run.
+- **Stress runs are hidden from `read_runs` by default.** That keeps `qr backtest list`
+  and every existing caller exactly as before. They will be excluded from trial counts
+  (part 4) because they change no parameter.
+- **A failure in a stress run fails the whole run**, which is logged as failed like any
+  other error. A run whose stress test cannot be computed should not look healthy.
 
 ## Rust core
 
