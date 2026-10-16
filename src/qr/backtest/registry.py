@@ -63,6 +63,14 @@ MIGRATIONS = [
     "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS walkforward_id TEXT",
     "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS fold INTEGER",
     "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS unseal_reason TEXT",
+    # Sweeps, trial counting, and the Deflated Sharpe Ratio (part 4).
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS sweep_id TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS trial_index INTEGER",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS params_json TEXT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS trial_seed BIGINT",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS n_returns INTEGER",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS return_skew DOUBLE",
+    "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS return_kurtosis DOUBLE",
 ]
 
 COLUMNS = [
@@ -107,6 +115,13 @@ COLUMNS = [
     "walkforward_id",
     "fold",
     "unseal_reason",
+    "sweep_id",
+    "trial_index",
+    "params_json",
+    "trial_seed",
+    "n_returns",
+    "return_skew",
+    "return_kurtosis",
 ]
 
 OK = "ok"
@@ -158,6 +173,14 @@ class RunRecord:
     walkforward_id: str | None = None  # set on the runs a walk-forward made
     fold: int | None = None
     unseal_reason: str | None = None  # set when a sealed segment was run again anyway
+    sweep_id: str | None = None  # set on the trials of a sweep
+    trial_index: int | None = None
+    params_json: str | None = None  # the trial's parameters (on top of the base config's)
+    trial_seed: int | None = None
+    # Of the run's daily excess returns, for the Deflated Sharpe Ratio (kurtosis not excess).
+    n_returns: int | None = None
+    return_skew: float | None = None
+    return_kurtosis: float | None = None
 
 
 def record_from_row(row: pd.Series) -> RunRecord:

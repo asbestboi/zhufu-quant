@@ -34,6 +34,7 @@ from qr.config import (
 from qr.ingest import FAILED, PARTIAL, run_ingest
 from qr.load import get_bars
 from qr.research.holdout import HoldoutError, SealedResult
+from qr.research.sweeps import SweepSummary
 from qr.sources.base import SourceError
 from qr.storage import StorageError
 from qr.validate import summarize, validate_symbols
@@ -634,6 +635,16 @@ def backtest_show(
     metrics.add_column("value", justify="right")
     for key, heading, kind in _RUN_METRICS:
         metrics.add_row(heading, format_metric(run[key], kind))
+    study = run["study_id"]
+    if isinstance(study, str) and study:
+        from qr.research.deflated import moments_from_row, study_deflated
+        from qr.research.sweeps import count_trials
+
+        metrics.add_row(f"Trials in study {study}", str(count_trials(study, data_dir)))
+        moments = moments_from_row(run)
+        if moments is not None:
+            found = study_deflated(study, moments, data_dir)
+            metrics.add_row("Deflated Sharpe (DSR)", format_metric(found.dsr, "pct"))
     console.print(metrics)
 
     dirty = run["git_dirty"]
@@ -885,6 +896,110 @@ def holdout_import_pairs(
         console.print(f"Imported {len(imported)} sealed results: {', '.join(imported)}")
     else:
         console.print("Already imported; nothing changed.")
+
+
+sweep_app = typer.Typer(help="Parameter sweeps, with every trial counted.", no_args_is_help=True)
+app.add_typer(sweep_app, name="sweep")
+
+
+@sweep_app.command("run")
+def sweep_run(
+    spec_file: Annotated[Path, typer.Argument(help="Sweep spec (YAML).")],
+    workers: Annotated[
+        int, typer.Option("--workers", help="Run trials in this many processes.")
+    ] = 1,
+    config: ConfigOption = None,
+    data_dir: DataDirOption = None,
+    reports_dir: ReportsDirOption = None,
+) -> None:
+    """Run every trial of a sweep on its segment and log each one to the registry."""
+    from qr.research.sweeps import load_sweep, run_sweep, summarize_sweep, write_sweep_report
+
+    try:
+        sweep = load_sweep(spec_file)
+    except ConfigError as exc:
+        raise _fail(str(exc)) from exc
+    console.print(
+        f"Sweep {sweep.spec.name}: {len(sweep.trials)} trials on {sweep.base.segment} of "
+        f"{sweep.base.split} ({sweep.base.start} to {sweep.base.end}), study {sweep.spec.study_id}"
+    )
+    result = run_sweep(sweep, workers=workers, data_dir=data_dir, universe_config=config)
+    summary = summarize_sweep(result.sweep_id, data_dir)
+    path = write_sweep_report(summary, reports_dir or DEFAULT_REPORTS_DIR)
+    _print_sweep(summary)
+    console.print(f"Report:  {path}")
+
+
+@sweep_app.command("show")
+def sweep_show(
+    sweep_id: Annotated[str, typer.Argument(help="Sweep id (a unique prefix is enough).")],
+    data_dir: DataDirOption = None,
+) -> None:
+    """A sweep's trials, its heatmap (two-parameter grids), and the stability check."""
+    from qr.research.sweeps import summarize_sweep
+
+    try:
+        summary = summarize_sweep(sweep_id, data_dir)
+    except ValueError as exc:
+        raise _fail(str(exc)) from exc
+    _print_sweep(summary)
+
+
+def _print_sweep(summary: SweepSummary) -> None:
+    from qr.research.sweeps import STABILITY_SHARE, heatmap_frame
+
+    sweep, trials = summary.sweep, summary.trials
+    names = (
+        list(summary.grid)
+        if summary.grid
+        else sorted({k for p in trials["params_json"] for k in json.loads(str(p))})
+    )
+    table = Table(title=f"Sweep {sweep['sweep_id']} ({sweep['name']})")
+    for column in ("trial", *names, "status", "Sharpe", "CAGR", "max drawdown"):
+        table.add_column(column, justify="left" if column == "status" else "right")
+    for row in trials.itertuples(index=False):
+        colour = "red" if row.status == "failed" else "green"
+        table.add_row(
+            str(row.trial_index), *(str(getattr(row, n)) for n in names),
+            f"[{colour}]{row.status}[/{colour}]",
+            format_metric(_maybe(row.sharpe), "num"), format_metric(_maybe(row.cagr), "pct"),
+            format_metric(_maybe(row.max_drawdown), "pct"),
+        )  # fmt: skip
+    console.print(table)
+    heat = heatmap_frame(summary)
+    if heat is not None:
+        grid = Table(title=f"Sharpe: {heat.index.name} (rows) x {heat.columns.name} (columns)")
+        grid.add_column(str(heat.index.name))
+        for column in heat.columns:
+            grid.add_column(str(column), justify="right")
+        for index, values in heat.iterrows():
+            grid.add_row(str(index), *(format_metric(_maybe(v), "num") for v in values))
+        console.print(grid)
+    found = summary.stability
+    if found is not None:
+        verdict = "[red]lone spike[/red]" if found.spike else "[green]plateau[/green]"
+        console.print(
+            f"Stability: best trial {found.best_index} (Sharpe {found.best_sharpe:.2f}) vs the "
+            f"median of {found.neighbours} neighbours {found.neighbour_median:.2f} "
+            f"(needs {STABILITY_SHARE:.0%}): {verdict}"
+        )
+    console.print(
+        f"[bold]Trials in study {sweep['study_id']}: {summary.n_trials}[/bold] "
+        "(every sweep, failed trials, and single runs)"
+    )
+    found = summary.deflated
+    if found is not None and summary.best_index is not None:
+        console.print(
+            f"Best trial {summary.best_index}: Sharpe "
+            f"{format_metric(_maybe(trials.iloc[summary.best_index]['sharpe']), 'num')}, PSR "
+            f"{format_metric(summary.psr, 'pct')}, [bold]DSR {format_metric(found.dsr, 'pct')}"
+            f"[/bold] (luck alone reaches Sharpe {found.benchmark_annualized:.2f} in "
+            f"{found.n_trials} trials)"
+        )
+
+
+def _maybe(value: Any) -> float | None:
+    return None if value is None or pd.isna(value) else float(value)
 
 
 if __name__ == "__main__":

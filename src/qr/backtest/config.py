@@ -194,12 +194,17 @@ def load_backtest_config(path: Path | str) -> BacktestConfig:
         raise ConfigError(f"{resolved}: invalid YAML: {exc}") from exc
     if not isinstance(raw, dict):
         raise ConfigError(f"{resolved}: expected a mapping at the top level")
+    return backtest_config_from_dict(raw, str(resolved))
+
+
+def backtest_config_from_dict(raw: dict[str, Any], source: str = "config") -> BacktestConfig:
+    """Validate a backtest config given as a mapping (a split is resolved first)."""
     from qr.research.splits import apply_split  # here: qr.research imports this module
 
     try:
         raw = apply_split(raw)
     except ConfigError as exc:
-        raise ConfigError(f"{resolved}: {exc}") from exc
+        raise ConfigError(f"{source}: {exc}") from exc
     try:
         return BacktestConfig.model_validate(raw)
     except ValidationError as exc:
@@ -207,4 +212,4 @@ def load_backtest_config(path: Path | str) -> BacktestConfig:
             f"  - {'.'.join(str(p) for p in err['loc']) or '<root>'}: {err['msg']}"
             for err in exc.errors()
         )
-        raise ConfigError(f"{resolved}: invalid backtest config\n{problems}") from exc
+        raise ConfigError(f"{source}: invalid backtest config\n{problems}") from exc
