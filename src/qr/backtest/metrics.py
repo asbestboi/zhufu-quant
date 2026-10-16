@@ -47,11 +47,33 @@ def annualized_volatility(returns: pd.Series) -> float:
     )
 
 
-def _excess(returns: pd.Series, risk_free_rate: float) -> pd.Series:
+# A risk-free rate: a constant annual rate, or a series of daily risk-free returns indexed
+# by date (e.g. a short-term Treasury fund's total return; see BacktestConfig.risk_free).
+RiskFree = float | pd.Series
+
+
+def excess_over(returns: pd.Series, risk_free_rate: RiskFree) -> pd.Series:
+    """``returns`` less the risk-free return of the same day.
+
+    A series must cover every day of ``returns``: a missing day is an error, never a
+    silent zero.
+    """
+    if isinstance(risk_free_rate, pd.Series):
+        aligned = risk_free_rate.reindex(returns.index)
+        missing = aligned.index[aligned.isna()]
+        if len(missing):
+            raise ValueError(
+                f"the risk-free series has no return on {len(missing)} of the "
+                f"{len(returns)} days, first {pd.Timestamp(missing[0]).date()}"
+            )
+        return returns - aligned
     return returns - risk_free_rate / PERIODS_PER_YEAR
 
 
-def sharpe_ratio(returns: pd.Series, risk_free_rate: float = 0.0) -> float:
+_excess = excess_over
+
+
+def sharpe_ratio(returns: pd.Series, risk_free_rate: RiskFree = 0.0) -> float:
     """Annualized mean excess return over its standard deviation. NaN when that is zero."""
     excess = _excess(returns, risk_free_rate)
     deviation = excess.std(ddof=1) if len(excess) > 1 else math.nan
@@ -60,7 +82,7 @@ def sharpe_ratio(returns: pd.Series, risk_free_rate: float = 0.0) -> float:
     return float(excess.mean() / deviation * math.sqrt(PERIODS_PER_YEAR))
 
 
-def sortino_ratio(returns: pd.Series, risk_free_rate: float = 0.0) -> float:
+def sortino_ratio(returns: pd.Series, risk_free_rate: RiskFree = 0.0) -> float:
     """Like Sharpe, but only returns below the risk-free rate count as risk.
 
     The downside deviation is the root mean square of the negative excess returns, taken
@@ -143,7 +165,7 @@ def probabilistic_sharpe_ratio(returns: pd.Series, benchmark_sharpe: float = 0.0
 
 
 def benchmark_statistics(
-    returns: pd.Series, benchmark_returns: pd.Series, risk_free_rate: float = 0.0
+    returns: pd.Series, benchmark_returns: pd.Series, risk_free_rate: RiskFree = 0.0
 ) -> dict[str, float]:
     """Beta, correlation, and annualized alpha against a benchmark's daily returns.
 
@@ -230,7 +252,7 @@ def rolling_volatility(returns: pd.Series, window: int = ROLLING_WINDOW) -> pd.S
     return (rolling * math.sqrt(PERIODS_PER_YEAR)).rename("rolling_volatility")
 
 
-def equity_metrics(equity: pd.Series, risk_free_rate: float = 0.0) -> dict[str, float]:
+def equity_metrics(equity: pd.Series, risk_free_rate: RiskFree = 0.0) -> dict[str, float]:
     """The statistics that need nothing but an equity curve (also used for the benchmark)."""
     returns = daily_returns(equity)
     return {
@@ -250,7 +272,7 @@ def equity_metrics(equity: pd.Series, risk_free_rate: float = 0.0) -> dict[str, 
 def compute_metrics(
     output: EngineOutput,
     benchmark: pd.Series | None = None,
-    risk_free_rate: float = 0.0,
+    risk_free_rate: RiskFree = 0.0,
 ) -> dict[str, float]:
     """Every headline statistic of one simulation, as a flat name -> number dict."""
     equity = output.equity

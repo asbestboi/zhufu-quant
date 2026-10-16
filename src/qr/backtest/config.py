@@ -31,6 +31,7 @@ _HASH_NEUTRAL: dict[str, Any] = {
     "study_id": None,
     "evaluate_from": None,
     "open_end": False,
+    "risk_free": None,
 }
 # Options that change what is reported about a run, not the run itself.
 _NOT_HASHED = {"engine_core", "cost_stress"}
@@ -98,6 +99,12 @@ class Constraints(_Model):
     min_trade_weight: float = Field(default=0.0, ge=0, lt=1)
 
 
+class RiskFreeConfig(_Model):
+    """Use a symbol's daily total return as the risk-free rate (e.g. ``{symbol: SHY}``)."""
+
+    symbol: str = Field(min_length=1)
+
+
 class BacktestConfig(_Model):
     """Everything that defines one backtest run."""
 
@@ -120,6 +127,9 @@ class BacktestConfig(_Model):
     constraints: Constraints = Constraints()
     whole_shares: bool = True  # event engine only; the vectorized engine is fractional
     risk_free_rate: float = 0.0  # annual, for Sharpe, Sortino, and alpha
+    # Instead of the constant: a symbol's daily total return (dividends included) as the
+    # risk-free series, for Sharpe, Sortino, PSR, alpha, DSR, and the fragile flag.
+    risk_free: RiskFreeConfig | None = None
     lookahead_checks: int = Field(default=3, ge=0)  # vectorized engine, see vectorized.py
     notes: str = ""
     # Scales commission, spread, slippage (and impact), and borrow together; 0 is free.
@@ -153,6 +163,8 @@ class BacktestConfig(_Model):
             raise ValueError(
                 f"evaluate_from {self.evaluate_from} is outside {self.start} to {self.end}"
             )
+        if self.risk_free is not None and self.risk_free_rate != 0:
+            raise ValueError("give either risk_free_rate or risk_free, not both")
         if (self.split is None) != (self.segment is None):
             raise ValueError("give both split and segment, or neither")
         if any(m < 0 for m in self.cost_stress):
