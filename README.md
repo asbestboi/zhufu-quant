@@ -76,6 +76,8 @@ Your own strategy configs and notebooks can go in `configs/private/` and
 | `qr backtest run CONFIG.yaml [--notes TEXT] [--reports-dir DIR] [--engine vectorized\|event] [--engine-core python\|rust] [--no-cost-stress] [--unseal-reason TEXT]` | Run a backtest, write its HTML tearsheet, log it to the registry. `--engine` and `--engine-core` override the config for this run. Also runs the config at 0x and 2x costs for the [cost stress test](#assumptions-and-cost-stress) unless `--no-cost-stress`. On a sealed segment the [holdout rules](#splits-sealed-holdouts-and-walk-forward) apply; `--unseal-reason` overrides a refusal and is recorded permanently. Exits non-zero (and logs the run as failed) if it could not run. |
 | `qr backtest list [--strategy NAME] [--limit 20]` | Recent runs from the registry. |
 | `qr backtest walkforward CONFIG.yaml [--split NAME] [--mode anchored\|rolling] [--train-years 5] [--test-months 12] [--step-months 12] [--grid GRID.yaml] [--embargo-days N]` | Walk-forward over the split's unsealed segments: choose parameters on each train window, test them on the next, stitch the test windows. See [Splits, sealed holdouts, walk-forward](#splits-sealed-holdouts-and-walk-forward). |
+| `qr sweep run SWEEP.yaml [--workers N]` | Run every trial of a parameter sweep on its segment (never a sealed one), log each one, write a sweep report. See [Sweeps, trial counts, and the Deflated Sharpe Ratio](#sweeps-trial-counts-and-the-deflated-sharpe-ratio). |
+| `qr sweep show SWEEP_ID` | A sweep's trials, its heatmap (two-parameter grids), the stability check, the study's trial count, and the best trial's DSR. |
 | `qr holdout list` | Every sealed test result, one per study, and every recorded override. |
 | `qr holdout import-pairs [FILE]` | Copy the pairs study's sealed test results into the holdout table, without re-running anything. |
 | `qr backtest compare RUN_ID RUN_ID ...` | Side-by-side metrics of logged runs; unique id prefixes are enough. |
@@ -695,6 +697,60 @@ uv run qr backtest walkforward configs/backtests/pairs_ko_pep.yaml --split pairs
     --mode anchored --train-years 5 --test-months 12 --step-months 12 --grid grid.yaml
 ```
 
+### Sweeps, trial counts, and the Deflated Sharpe Ratio
+
+**Sweeps.** A sweep spec in `configs/sweeps/` names a base backtest config (which must
+name a split), a `study_id`, a segment (default `train`; a sealed segment is refused),
+and either a grid or a random search:
+
+```yaml
+name: sma_spy_grid
+base: ../backtests/sma_spy_split.yaml   # relative to this file
+study_id: sma_spy_v1
+segment: train
+grid:
+  fast: [10, 20, 50]
+  slow: [100, 200]
+# or: random: { n: 50, seed: 42, ranges: { fast: { low: 5, high: 60, int: true },
+#                                          slow: [100, 150, 200] } }
+```
+
+`qr sweep run` logs every trial as a registry row with `sweep_id`, `study_id`,
+`trial_index`, its parameters, and its status; a trial that raises is logged as
+`failed` with the error, and still counts. Trials compute screening metrics only (no
+tearsheet, no cost stress). `--workers N` runs them in a process pool; results are put
+back in trial order and each trial's seed (`trial_seed`) is the same however it runs, so
+parallel and serial sweeps log identical results. The sweep report and `qr sweep show`
+give a table of trials, a Sharpe heatmap for two-parameter grids, and a **parameter
+stability** check. That check compares the best trial's Sharpe with the median Sharpe of
+its grid neighbours (every point one step away in one or more parameters). It flags a
+**lone spike** when that median is below 75% of the best, or the best is not positive.
+
+**Trial counting.** `n_trials` for a study is every trial ever run under its
+`study_id`: all sweeps, failed trials included, plus single `qr backtest run`s tagged
+with it. Cost-stress runs (same parameters) and walk-forward runs (reported separately)
+are not trials. Every report of a run in a study shows the count prominently.
+
+**Deflated Sharpe Ratio** (Bailey & López de Prado, 2014). After `N` trials the best
+Sharpe is high by luck alone. DSR is the Probabilistic Sharpe Ratio of the selected run,
+measured not against zero but against the Sharpe the best of `N` worthless trials would
+be expected to reach. With per-period (daily) Sharpe ratios:
+
+```
+SR0 = sqrt(V) * ((1 - g) * Z^-1(1 - 1/N) + g * Z^-1(1 - 1/(N e)))
+DSR = Z( (SR - SR0) * sqrt(T - 1) / sqrt(1 - skew * SR + (kurt - 1) / 4 * SR^2) )
+```
+
+`V` is the variance of the study's trial Sharpe ratios, `g` the Euler-Mascheroni
+constant (0.5772), `Z` the standard normal CDF, `T` the selected run's number of daily
+returns, `skew` and `kurt` their skewness and (non-excess) kurtosis. With one trial,
+`SR0 = 0` and DSR equals PSR. Each run stores its return count, skew, and kurtosis in the
+registry, so DSR can be computed later from the registry alone. Assumptions: trials are
+treated as independent (correlated trials overstate `N`, so DSR errs on the low side),
+and `V` is estimated from the trials themselves. DSR is shown next to Sharpe and PSR in
+sweep reports (for the best trial), in the tearsheet of any run in a study, and in
+`qr backtest show`.
+
 ### Data hashes and provenance
 
 Every run records which data and which environment produced it, in the registry, in
@@ -1120,6 +1176,24 @@ pass than real trading.
   walk-forward is always known.
 - **`open_end`, `split`, `segment`, `study_id`, and `evaluate_from` are left out of the
   config hash at their defaults**, so existing configs keep their hashes.
+
+### Research discipline: sweeps, trial counts, DSR (part 4)
+
+- **A sweep's base config must name a split**, because a sweep runs on a segment and
+  refusing sealed segments needs to know which ones are sealed. The sweep's `segment` and
+  `study_id` replace the base config's own.
+- **Stability threshold: 75%.** The spec asks for a lone spike to be flagged without a
+  number. 75% is the stricter of the common choices, and a best trial with a Sharpe of
+  zero or below is always flagged.
+- **Random searches have no neighbours**, so the stability check applies to grids only.
+- **Failed trials count in `n_trials`** and in DSR's `N`, but have no Sharpe, so they do
+  not enter the variance `V`.
+- **The DSR of a single run in a study** counts that run as one more trial (it is
+  logged right after its report is written).
+- **Parallel trials run in spawned processes**, not forked ones: forking a process that
+  holds DuckDB's threads can deadlock, and spawn is what Windows uses anyway.
+- **Trials are not cached across processes**: each loads its data from the store, only
+  up to the segment's end, exactly as a single run does.
 
 ## Rust core
 
