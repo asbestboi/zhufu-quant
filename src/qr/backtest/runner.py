@@ -293,6 +293,10 @@ def execute(
             engine_core=environment.engine_core,
         )
         result.holdout_reused = reused
+        if config.study_id:
+            from qr.research.sweeps import count_trials  # sweeps imports this module
+
+            result.study_trials = count_trials(config.study_id, data_dir) + 1
         report = Path(reports_dir or DEFAULT_REPORTS_DIR) / f"{run_id}_{config.name}.html"
         write_report(
             result,
@@ -353,6 +357,7 @@ def execute(
         study_id=config.study_id,
         result_label=result_label(config),
         unseal_reason=reused,
+        **_moment_columns(result if error is None else None),
     )
     registry.log_run(record, data_dir)
     if sealed_segment and error is None and result is not None:
@@ -371,6 +376,26 @@ def execute(
         for multiplier, stressed in result.stress_metrics.items():
             registry.log_run(_stress_record(record, config, multiplier, stressed), data_dir)
     return RunOutcome(record=record, result=result if error is None else None, error=error)
+
+
+def excess_returns(result: BacktestResult) -> pd.Series:
+    """Daily returns after costs, less the config's risk-free rate."""
+    returns = result.equity.pct_change().iloc[1:]
+    return returns - result.config.risk_free_rate / 252
+
+
+def _moment_columns(result: BacktestResult | None) -> dict[str, Any]:
+    """The registry columns the Deflated Sharpe Ratio needs from a run."""
+    if result is None:
+        return {}
+    from qr.research.deflated import return_moments
+
+    moments = return_moments(excess_returns(result))
+    return {
+        "n_returns": moments.observations,
+        "return_skew": _number(moments.skew),
+        "return_kurtosis": _number(moments.kurtosis),
+    }
 
 
 def _stress_columns(result: BacktestResult | None) -> dict[str, Any]:

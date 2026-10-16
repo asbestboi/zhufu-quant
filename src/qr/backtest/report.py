@@ -377,6 +377,16 @@ def _cost_table(result: BacktestResult) -> str:
     return f"<table><tr><th>Before and after costs</th><th>USD</th></tr>{body}</table>"
 
 
+def _study_tiles(result: BacktestResult) -> list[str]:
+    """For a run in a study: how many trials the study has (and later, its DSR)."""
+    if result.study_trials is None:
+        return []
+    study = html.escape(str(result.config.study_id))
+    return [
+        _tile("Trials in study", f"{result.study_trials:,}", f"study {study}, this run included")
+    ]
+
+
 def _reused_banner(result: BacktestResult) -> str:
     if result.holdout_reused is None:
         return ""
@@ -507,6 +517,7 @@ def render_report(
                   before("max_drawdown", "pct")),
             _tile("Total costs", format_metric(net.get("total_costs"), "money"),
                   f"{format_metric(net.get('trades'), 'int')} trades"),
+            *_study_tiles(result),
         ]
     )  # fmt: skip
     sessions = result.equity.index
