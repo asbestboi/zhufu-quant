@@ -173,10 +173,18 @@ def ingest(
     universe: UniverseOption = None,
     config: ConfigOption = None,
     data_dir: DataDirOption = None,
+    backfill: Annotated[
+        bool,
+        typer.Option(
+            "--backfill",
+            help="Only fetch history missing before each symbol's first stored bar, for "
+            "symbols whose configured start date is earlier than that.",
+        ),
+    ] = False,
 ) -> None:
     """Incrementally download bars and corporate actions, then run quality checks."""
     cfg = _config(config)
-    report = run_ingest(cfg, data_dir, _selection(cfg, symbols, universe))
+    report = run_ingest(cfg, data_dir, _selection(cfg, symbols, universe), backfill=backfill)
 
     table = Table(title=f"Ingest run {report.run_id}")
     for column in ("symbol", "status", "rows written", "message"):

@@ -171,6 +171,12 @@ def read_instruments(con: Connection) -> pd.DataFrame:
     return con.execute("SELECT * FROM instruments ORDER BY symbol").df()
 
 
+def first_bar_date(con: Connection, symbol: str) -> date | None:
+    """Date of the oldest stored bar for ``symbol``, or None if there are none."""
+    row = con.execute("SELECT min(date) FROM daily_bars WHERE symbol = ?", [symbol]).fetchone()
+    return row[0] if row else None
+
+
 def last_bar_date(con: Connection, symbol: str) -> date | None:
     """Date of the newest stored bar for ``symbol``, or None if there are none."""
     row = con.execute("SELECT max(date) FROM daily_bars WHERE symbol = ?", [symbol]).fetchone()

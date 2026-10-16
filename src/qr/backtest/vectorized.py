@@ -311,12 +311,15 @@ def run_vectorized(
     The strategy sees the adjusted bars up to the config's end date and returns a weight
     for every date; the engine then checks those weights for look-ahead
     (:func:`verify_no_lookahead`), applies the constraints, removes weights on symbols
-    that have not had a bar yet, and trades each decision one session later.
+    that have not had a bar yet (or fewer than the strategy's ``warmup_bars``), and
+    trades each decision one session later.
     """
     sessions = data.sessions(config.start, config.end)
     weights = clean_weights(strategy.target_weights(data.adjusted), data)
     verify_no_lookahead(strategy, data, weights, sessions, config.lookahead_checks)
     limited = apply_constraints(weights.to_numpy(), config.constraints)
-    # A symbol is not part of the universe until its first bar has printed.
-    listed = np.maximum.accumulate(np.isfinite(data.panel("close")), axis=0)
+    # A symbol is not part of the universe until its first bar has printed, and not
+    # tradable until it has the strategy's warm-up bars (see WeightStrategy.warmup_bars).
+    bars_seen = np.cumsum(np.isfinite(data.panel("close")), axis=0)
+    listed = bars_seen >= max(1, strategy.warmup_bars)
     return simulate(limited * listed, data, config, costs)

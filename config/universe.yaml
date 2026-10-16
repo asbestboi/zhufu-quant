@@ -33,6 +33,15 @@ universe:
   - { symbol: IWM,  source: yahoo, asset_class: etf }
   - { symbol: TLT,  source: yahoo, asset_class: etf }
   - { symbol: GLD,  source: yahoo, asset_class: etf }
+  # Cross-asset ETFs for the trend and momentum study (group `etf`)
+  - { symbol: EFA,  source: yahoo, asset_class: etf }
+  - { symbol: EEM,  source: yahoo, asset_class: etf }
+  - { symbol: VNQ,  source: yahoo, asset_class: etf }
+  - { symbol: IEF,  source: yahoo, asset_class: etf }
+  - { symbol: LQD,  source: yahoo, asset_class: etf }
+  - { symbol: TIP,  source: yahoo, asset_class: etf }
+  - { symbol: DBC,  source: yahoo, asset_class: etf }
+  - { symbol: SHY,  source: yahoo, asset_class: etf }
   - { symbol: AAPL, source: yahoo, asset_class: equity }
   - { symbol: MSFT, source: yahoo, asset_class: equity }
   # Candidates for the pairs-trading study
@@ -50,6 +59,12 @@ universe:
   - { symbol: BTC/USD, source: crypto, asset_class: crypto }
 
 # Named universes, e.g. `qr ingest --universe pairs`. Every symbol must be defined above.
+# A group can set its own history start: { start_date: ..., symbols: [...] }. A symbol
+# starts at the earliest start_date of the groups listing it (else the global one above);
+# after moving a start earlier, `qr ingest --backfill` fetches the missing history.
 groups:
   core:  [SPY, QQQ, IWM, TLT, GLD, AAPL, MSFT]
   pairs: [KO, PEP, XOM, CVX, V, MA, HD, LOW, GS, MS]
+  etf:
+    start_date: 2003-01-01
+    symbols: [SPY, IWM, EFA, EEM, VNQ, TLT, IEF, LQD, TIP, GLD, DBC, SHY]

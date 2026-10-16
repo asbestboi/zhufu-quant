@@ -80,10 +80,51 @@ def test_groups(tmp_path: Path) -> None:
     assert load_config(write(tmp_path, VALID)).groups == {}
 
 
+def test_group_start_dates(tmp_path: Path) -> None:
+    text = VALID + (
+        "groups:\n"
+        "  macro: [SPY]\n"
+        "  long: { start_date: 2003-01-01, symbols: [SPY] }\n"
+        "  longer: { start_date: 2001-01-01, symbols: [SPY] }\n"
+        "  late: { start_date: 2020-01-01, symbols: [BTC/USD] }\n"
+    )
+    config = load_config(write(tmp_path, text))
+    assert config.group("long") == ["SPY"]
+    assert config.groups["macro"] == ["SPY"]  # list-form groups are unchanged
+    assert config.start_date_for("SPY") == date(2001, 1, 1)  # the earliest group wins
+    assert config.start_date_for("BTC/USD") == date(2020, 1, 1)
+    assert load_config(write(tmp_path, VALID)).start_date_for("SPY") == date(2015, 6, 1)
+
+
+@pytest.mark.parametrize(
+    ("group", "expected"),
+    [
+        ("{ start_date: 2003-01-01 }", "missing 'symbols'"),
+        ("{ symbols: [SPY], start: 2003-01-01 }", "unknown keys start"),
+        ("{ start_date: 2999-01-01, symbols: [SPY] }", "in the future"),
+        ("{ start_date: soon, symbols: [SPY] }", "group_start_dates"),
+    ],
+)
+def test_invalid_group_start_dates(tmp_path: Path, group: str, expected: str) -> None:
+    with pytest.raises(ConfigError, match=expected):
+        load_config(write(tmp_path, VALID + f"groups:\n  long: {group}\n"))
+
+
+def test_group_start_dates_cannot_be_set_directly(tmp_path: Path) -> None:
+    text = VALID + "group_start_dates: { core: 2003-01-01 }\n"
+    with pytest.raises(ConfigError, match="derived"):
+        load_config(write(tmp_path, text))
+
+
 def test_default_config_groups() -> None:
     assert universe_symbols("core", REPO_CONFIG)[0] == "SPY"
     pairs = ["KO", "PEP", "XOM", "CVX", "V", "MA", "HD", "LOW", "GS", "MS"]
     assert universe_symbols("pairs", REPO_CONFIG) == pairs
+    etf = ["SPY", "IWM", "EFA", "EEM", "VNQ", "TLT", "IEF", "LQD", "TIP", "GLD", "DBC", "SHY"]
+    assert universe_symbols("etf", REPO_CONFIG) == etf
+    config = load_config(REPO_CONFIG)
+    assert config.start_date_for("SHY") == date(2003, 1, 1)
+    assert config.start_date_for("KO") == config.start_date
 
 
 @pytest.mark.parametrize(

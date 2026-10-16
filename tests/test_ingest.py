@@ -14,7 +14,7 @@ import pandas as pd
 
 from qr import snapshots, storage
 from qr.config import UniverseConfig, db_path, raw_dir
-from qr.ingest import detect_revisions, fetch_window, run_ingest
+from qr.ingest import backfill_window, detect_revisions, fetch_window, run_ingest
 from qr.sources.base import DataSource
 
 from .conftest import AFTER_JAN_16, Clock, FakeSource
@@ -412,3 +412,112 @@ def test_a_success_resets_the_failure_count(
         "ok",
     ]
     assert source.probes == 1  # never three in a row, so no second probe
+
+
+# ------------------------------------------------------------------ backfill
+
+
+def test_backfill_window() -> None:
+    # Stored from Mon Jan 8; the window reaches five sessions in, to Fri Jan 12.
+    assert backfill_window(date(2024, 1, 8), "equity", date(2024, 1, 1)) == (
+        date(2024, 1, 1),
+        date(2024, 1, 12),
+    )
+    assert backfill_window(date(2024, 1, 8), "equity", date(2024, 1, 8)) is None
+    assert backfill_window(date(2024, 1, 8), "equity", date(2024, 1, 10)) is None
+    assert backfill_window(None, "equity", date(2024, 1, 1)) is None
+    # Jan 1 is a holiday and Jan 2 the first session: history from Jan 2 is complete.
+    assert backfill_window(date(2024, 1, 2), "equity", date(2024, 1, 1)) is None
+
+
+def test_group_start_date_drives_the_first_fetch(
+    make_config: MakeConfig, data_dir: Path, clean_bars: pd.DataFrame
+) -> None:
+    config = make_config(
+        "AAA",
+        "BBB",
+        start_date="2024-01-08",
+        groups={"old": {"start_date": "2024-01-01", "symbols": ["AAA"]}},
+    )
+    source = FakeSource({"AAA": clean_bars, "BBB": clean_bars})
+    ingest(config, data_dir, source)
+    assert source.calls == [
+        ("AAA", date(2024, 1, 1), date(2024, 1, 16)),
+        ("BBB", date(2024, 1, 8), date(2024, 1, 16)),
+    ]
+
+
+def test_backfill_fetches_missing_earlier_history_once(
+    make_config: MakeConfig, data_dir: Path, clean_bars: pd.DataFrame
+) -> None:
+    source = FakeSource({"AAA": clean_bars, "BBB": clean_bars})
+    ingest(make_config("AAA", "BBB", start_date="2024-01-08"), data_dir, source)
+    assert len(stored_bars(data_dir, "AAA")) == 6  # Jan 8 to Jan 16
+
+    # The study now needs AAA from Jan 1; BBB keeps the global start.
+    later = make_config(
+        "AAA",
+        "BBB",
+        start_date="2024-01-08",
+        groups={"old": {"start_date": "2024-01-01", "symbols": ["AAA"]}},
+    )
+    source.calls.clear()
+    report = ingest(later, data_dir, source, backfill=True)
+    assert not report.failed
+    assert source.calls == [("AAA", date(2024, 1, 1), date(2024, 1, 12))]
+    by_symbol = {r.symbol: r for r in report.results}
+    assert by_symbol["AAA"].rows_written == 4
+    assert by_symbol["AAA"].message == "backfilled 2024-01-02 to 2024-01-12"
+    assert by_symbol["BBB"].message == "no backfill needed (starts 2024-01-08)"
+    pd.testing.assert_frame_equal(stored_bars(data_dir, "AAA")[clean_bars.columns], clean_bars)
+    assert query(data_dir, "SELECT first_date FROM instruments WHERE symbol = 'AAA'") == [
+        (date(2024, 1, 2),)
+    ]
+    assert len(snapshots.list_snapshots(raw_dir(data_dir), "yahoo", "AAA")) == 2
+    assert issues(data_dir).empty
+
+    # Now complete from the first session: asking again sends no request.
+    source.calls.clear()
+    again = ingest(later, data_dir, source, backfill=True)
+    assert source.calls == []
+    assert again.results[0].message == "no backfill needed (starts 2024-01-02)"
+
+
+def test_backfill_of_a_symbol_listed_after_the_start_finds_nothing_earlier(
+    make_config: MakeConfig, data_dir: Path, clean_bars: pd.DataFrame
+) -> None:
+    # Listed on Jan 8: the first run asked from Jan 1 and got Jan 8 onwards.
+    source = FakeSource({"AAA": clean_bars.iloc[4:]})
+    config = make_config("AAA")
+    ingest(config, data_dir, source)
+    report = ingest(config, data_dir, source, backfill=True)
+    assert report.results[0].rows_written == 0
+    assert report.results[0].message == "no earlier history at yahoo (starts 2024-01-08)"
+    assert len(stored_bars(data_dir, "AAA")) == 6
+
+
+def test_backfill_logs_revisions_in_the_overlap(
+    make_config: MakeConfig, data_dir: Path, clean_bars: pd.DataFrame
+) -> None:
+    source = FakeSource({"AAA": clean_bars})
+    ingest(make_config("AAA", start_date="2024-01-08"), data_dir, source)
+
+    revised = clean_bars.copy()
+    revised.loc[revised["date"] == pd.Timestamp("2024-01-09"), "close"] *= 1.01
+    source.bars["AAA"] = revised
+    groups = {"old": {"start_date": "2024-01-01", "symbols": ["AAA"]}}
+    ingest(
+        make_config("AAA", start_date="2024-01-08", groups=groups), data_dir, source, backfill=True
+    )
+    found = issues(data_dir)
+    revisions = found[found["check_name"] == "revision"]
+    assert [d.date() for d in pd.to_datetime(revisions["date"])] == [date(2024, 1, 9)]
+
+
+def test_backfill_skips_symbols_with_nothing_stored(
+    make_config: MakeConfig, data_dir: Path, clean_bars: pd.DataFrame
+) -> None:
+    source = FakeSource({"AAA": clean_bars})
+    report = ingest(make_config("AAA"), data_dir, source, backfill=True)
+    assert source.calls == []
+    assert report.results[0].message == "no backfill needed (nothing stored yet)"

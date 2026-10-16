@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from datetime import date
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -75,6 +75,14 @@ class Instrument(_Model):
 
 
 class UniverseConfig(_Model):
+    """The validated ``config/universe.yaml``.
+
+    A group is either a list of symbols or ``{start_date: ..., symbols: [...]}``. The
+    second form gives the group's symbols their own history start (see
+    :meth:`start_date_for`); ``group_start_dates`` is filled from it and cannot be set
+    directly.
+    """
+
     start_date: date
     timezone: str = "UTC"
     sources: SourcesConfig = SourcesConfig()
@@ -83,6 +91,33 @@ class UniverseConfig(_Model):
     crosscheck: CrosscheckSettings = CrosscheckSettings()
     universe: list[Instrument] = Field(min_length=1)
     groups: dict[str, list[str]] = Field(default_factory=dict)
+    group_start_dates: dict[str, date] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _split_group_start_dates(cls, raw: Any) -> Any:
+        if not isinstance(raw, dict):
+            return raw
+        if "group_start_dates" in raw:
+            raise ValueError("group_start_dates is derived; set start_date inside a group")
+        groups = raw.get("groups")
+        if not isinstance(groups, dict):
+            return raw
+        members: dict[str, Any] = {}
+        starts: dict[str, Any] = {}
+        for name, value in groups.items():
+            if isinstance(value, dict):
+                unknown = sorted(set(value) - {"symbols", "start_date"})
+                if unknown:
+                    raise ValueError(f"group '{name}': unknown keys {', '.join(unknown)}")
+                if "symbols" not in value:
+                    raise ValueError(f"group '{name}': missing 'symbols'")
+                members[name] = value["symbols"]
+                if value.get("start_date") is not None:
+                    starts[name] = value["start_date"]
+            else:
+                members[name] = value
+        return {**raw, "groups": members, "group_start_dates": starts}
 
     @model_validator(mode="after")
     def _check(self) -> UniverseConfig:
@@ -102,7 +137,22 @@ class UniverseConfig(_Model):
             repeated = sorted({s for s in members if members.count(s) > 1})
             if repeated:
                 raise ValueError(f"group '{name}' repeats symbols: {', '.join(repeated)}")
+        for name, start in self.group_start_dates.items():
+            if start > date.today():
+                raise ValueError(f"group '{name}': start_date {start} is in the future")
         return self
+
+    def start_date_for(self, symbol: str) -> date:
+        """The date ``symbol``'s history should start from.
+
+        The earliest ``start_date`` of the groups that list the symbol and set one, so a
+        symbol shared by several studies gets the longest history any of them needs.
+        Symbols in no such group use the global ``start_date``.
+        """
+        starts = [
+            start for name, start in self.group_start_dates.items() if symbol in self.groups[name]
+        ]
+        return min(starts) if starts else self.start_date
 
     def source_enabled(self, source: str) -> bool:
         """Whether instruments of ``source`` should be ingested."""
