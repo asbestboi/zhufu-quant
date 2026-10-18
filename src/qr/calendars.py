@@ -55,6 +55,18 @@ def last_completed_session(asset_class: str, now: datetime) -> date:
     return last
 
 
+def session_open(asset_class: str, day: date) -> datetime:
+    """When ``day``'s regular session opens (naive UTC). ``day`` must be a session."""
+    if asset_class == CRYPTO:
+        return datetime(day.year, day.month, day.day)
+    schedule = _schedule(day, day)
+    if schedule.empty:
+        raise ValueError(f"{day} is not a {EXCHANGE_CALENDAR} session")
+    opened = schedule["market_open"].dt.tz_convert("UTC").dt.tz_localize(None)
+    result: datetime = opened.iloc[0].to_pydatetime()
+    return result
+
+
 def sessions_back(asset_class: str, day: date, n: int) -> date:
     """The session ``n`` sessions before ``day`` (``day`` itself counts as zero if it is one)."""
     if asset_class == CRYPTO:

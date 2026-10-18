@@ -14,6 +14,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 
+from qr.backtest.account import AccountState
 from qr.live.broker import Broker, PriceQuote
 from qr.live.planner import PlannedOrder
 
@@ -76,24 +77,52 @@ def check_no_short_no_leverage(
 
 def check_order_limits(
     orders: Sequence[PlannedOrder],
-    equity: float,
+    capital: float,
     *,
     max_order_value: float = DEFAULT_MAX_ORDER_VALUE,
     max_total_turnover: float = DEFAULT_MAX_TOTAL_TURNOVER,
 ) -> None:
-    """Refuse a single order, or the plan's total turnover, over its limit of equity."""
-    if equity <= 0:
+    """Refuse a single order, or the plan's total turnover, over its limit of ``capital``.
+
+    ``capital`` is the account's *managed* capital (``LiveConfig.capital_limit``), not
+    its total equity -- the same base the plan itself was sized against.
+    """
+    if capital <= 0:
         return
-    too_big = [o.symbol for o in orders if o.estimated_value > max_order_value * equity]
+    too_big = [o.symbol for o in orders if o.estimated_value > max_order_value * capital]
     if too_big:
         raise SafetyViolation(
             f"orders exceed the {max_order_value:.0%} max-single-order-value limit: "
             f"{', '.join(too_big)}"
         )
     turnover = sum(o.estimated_value for o in orders)
-    if turnover > max_total_turnover * equity:
+    if turnover > max_total_turnover * capital:
         raise SafetyViolation(
-            f"total turnover ${turnover:,.2f} exceeds the {max_total_turnover:.0%} of equity limit"
+            f"total turnover ${turnover:,.2f} exceeds the {max_total_turnover:.0%} of "
+            "managed-capital limit"
+        )
+
+
+def check_capital_limit(
+    orders: Sequence[PlannedOrder], account: AccountState, capital_limit: float
+) -> None:
+    """Refuse a plan whose resulting exposure would exceed the managed capital.
+
+    Computed from this plan's own order sizing (already capital-relative, see
+    ``planner.py``) plus every other held position's current market value -- an
+    absolute dollar ceiling, independent of whatever weight-leverage limit is
+    configured, and a check against the planner having been sized off the wrong number
+    in the first place (it should never be, but this does not take that on faith).
+    """
+    if capital_limit <= 0:
+        return
+    traded = {o.symbol for o in orders}
+    resulting = sum(abs(o.target_weight) * capital_limit for o in orders)
+    resulting += sum(abs(p.market_value) for s, p in account.positions.items() if s not in traded)
+    if resulting > capital_limit + 1e-6:
+        raise SafetyViolation(
+            f"plan would expose ${resulting:,.2f}, over the ${capital_limit:,.2f} "
+            "managed-capital limit"
         )
 
 
@@ -134,7 +163,8 @@ def run_safety_checks(
     target_weights: Mapping[str, float],
     allowed_symbols: Sequence[str],
     orders: Sequence[PlannedOrder],
-    equity: float,
+    account: AccountState,
+    capital: float,
     quotes: Mapping[str, PriceQuote] | None = None,
     reference_prices: Mapping[str, float] | None = None,
     now: datetime | None = None,
@@ -148,14 +178,18 @@ def run_safety_checks(
 
     The paper-only guard and the kill switch run before anything else looks at the
     decision itself, so a misconfigured or killed run never gets as far as judging it.
+    ``capital`` is the managed capital (``LiveConfig.capital_limit``), not the account's
+    total equity -- every limit here is a fraction (or, for ``check_capital_limit``, the
+    whole) of that number, never of the broader account.
     """
     check_paper_account(broker)
     check_kill_switch(working_dir)
     check_universe(target_weights, allowed_symbols)
     check_no_short_no_leverage(target_weights, max_gross_leverage=max_gross_leverage)
     check_order_limits(
-        orders, equity, max_order_value=max_order_value, max_total_turnover=max_total_turnover
+        orders, capital, max_order_value=max_order_value, max_total_turnover=max_total_turnover
     )
+    check_capital_limit(orders, account, capital)
     if quotes is not None:
         check_price_sanity(
             quotes,

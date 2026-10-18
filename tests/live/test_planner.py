@@ -27,6 +27,30 @@ def test_cash_buffer_shrinks_the_investable_amount() -> None:
     assert plan.orders[0].quantity == 90.0
 
 
+def test_displayed_target_weight_is_after_the_cash_buffer() -> None:
+    # A raw 100% target with a 10% cash buffer is actually sized towards 90% of equity;
+    # the displayed target_weight must say that, not the strategy's raw 100%, or a reader
+    # comparing it against current_weight (also a fraction of total equity) is misled.
+    account = make_account(cash=10_000.0)
+    plan = plan_orders(
+        {"AAA": 1.0}, account, {"AAA": 100.0}, cash_buffer=0.10, min_trade_weight=0.0
+    )
+    assert plan.orders[0].target_weight == pytest.approx(0.90)
+
+
+def test_capital_overrides_account_equity_as_the_sizing_basis() -> None:
+    # A $100,000 account managing only $10,000: sized and reported against the $10,000,
+    # not the real equity -- this is how capital_limit keeps a paper account's play money
+    # out of the plan entirely.
+    account = make_account(cash=100_000.0)
+    plan = plan_orders(
+        {"AAA": 1.0}, account, {"AAA": 100.0}, capital=10_000.0, cash_buffer=0.0,
+        min_trade_weight=0.0,
+    )  # fmt: skip
+    assert plan.orders[0].quantity == 100.0
+    assert plan.capital == 10_000.0
+
+
 def test_cash_buffer_must_be_a_valid_fraction() -> None:
     account = make_account(cash=10_000.0)
     with pytest.raises(ValueError, match="cash_buffer"):

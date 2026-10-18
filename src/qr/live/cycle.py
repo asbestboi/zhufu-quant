@@ -101,6 +101,7 @@ def _plan_for(
         decision.target_weights,
         account,
         prices,
+        capital=config.capital_limit,
         cash_buffer=cash_buffer,
         min_trade_weight=config.min_trade_weight,
     )
@@ -192,7 +193,7 @@ def run_cycle(
                 config.strategy, config.params, config.universe, decision_date, data_dir=data_dir
             )
             journal.record_decision(
-                config.strategy, decision_date, weights, equity=broker.account().equity,
+                config.strategy, decision_date, weights, equity=config.capital_limit,
                 cash_buffer=config.cash_buffer, data_directory=data_dir,
             )  # fmt: skip
             decision = journal.find_decision(
@@ -208,7 +209,8 @@ def run_cycle(
             target_weights=decision.target_weights,
             allowed_symbols=config.universe,
             orders=plan.orders,
-            equity=account.equity,
+            account=account,
+            capital=config.capital_limit,
             quotes=quotes,
             now=checked_at,
             max_gross_leverage=config.max_gross_leverage,

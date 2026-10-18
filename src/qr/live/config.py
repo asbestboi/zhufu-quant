@@ -1,9 +1,8 @@
 """The paper-trading config: one YAML file per live strategy, validated with pydantic.
 
-Deliberately small for Part 1: a broker type beyond ``sim`` (IBKR, paper only) and the
-scheduling/approval fields of the spec's Part 4 are added when those parts are built, not
-speculatively here. No strategy-specific mapping or UCITS translation belongs in this
-public package at all; this config only names a registered ``qr`` strategy and the
+The scheduling/approval fields of the spec's Part 4 are added when that part is built,
+not speculatively here. No strategy-specific mapping or UCITS translation belongs in
+this public package at all; this config only names a registered ``qr`` strategy and the
 symbols it decides on.
 """
 
@@ -17,11 +16,25 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from qr.config import ConfigError
 
-BrokerName = Literal["sim"]
+BrokerName = Literal["sim", "ibkr"]
 
 
 class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class IBKRConfig(_Model):
+    """Connection settings for ``qr.live.ibkr`` (IB Gateway or TWS, paper port only).
+
+    No credentials here, ever -- those stay with IB Gateway itself (see the README).
+    """
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=4002, gt=0, le=65535)  # 4002: IB Gateway paper; 7497: TWS paper
+    client_id: int = Field(default=1, ge=0)
+    # How far through the bid/ask mid a day limit order is priced, to help it fill
+    # without chasing the market: 0.3% through the mid, in the order's direction.
+    limit_buffer: float = Field(default=0.003, ge=0, lt=1)
 
 
 class LiveConfig(_Model):
@@ -33,7 +46,13 @@ class LiveConfig(_Model):
     universe: list[str] = Field(min_length=1)
     rebalance: Literal["monthly"] = "monthly"
     broker: BrokerName = "sim"
-    initial_cash: float = Field(default=100_000.0, gt=0)
+    ibkr: IBKRConfig = Field(default_factory=IBKRConfig)
+    initial_cash: float = Field(default=100_000.0, gt=0)  # sim broker's starting cash only
+    # The account's *managed* capital, in its base currency: qr.live plans, checks, and
+    # reports against this number, never the account's total equity. A paper account is
+    # usually funded with far more than this; capital_limit is what keeps it from ever
+    # being asked to invest more than the slice it was actually meant to manage.
+    capital_limit: float = Field(default=10_000.0, gt=0)
     cash_buffer: float = Field(default=0.01, ge=0, lt=1)
     min_trade_weight: float = Field(default=0.02, ge=0, lt=1)
     max_single_order_value: float = Field(default=0.5, gt=0)

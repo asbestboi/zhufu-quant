@@ -74,6 +74,11 @@ def render_text(report: MonthlyReport) -> str:
 
     for _, decision in report.decisions.iterrows():
         lines.append(f"## {decision['decision_id']}  [{decision['status']}]")
+        # "equity" in the journal is the managed capital (LiveConfig.capital_limit) this
+        # decision was sized against, not the paper account's total equity.
+        capital = decision["equity"]
+        if pd.notna(capital):
+            lines.append(f"  managed capital: ${capital:,.2f}")
         weights = json.loads(decision["target_weights_json"])
         for symbol, weight in sorted(weights.items()):
             lines.append(f"  target {symbol}: {weight:.2%}")

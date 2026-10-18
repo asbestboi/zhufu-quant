@@ -58,8 +58,9 @@ def test_three_monthly_cycles_match_the_backtest_within_whole_shares(tmp_path: P
 
     params = {"lookback": LOOKBACK, "skip": SKIP, "top_n": TOP_N}
     config = make_live_config(
-        SYMBOLS, tmp_path, strategy="xs_momentum", params=params, initial_cash=100_000.0
-    )
+        SYMBOLS, tmp_path, strategy="xs_momentum", params=params, initial_cash=100_000.0,
+        capital_limit=100_000.0,
+    )  # fmt: skip
     broker = SimBroker(initial_cash=config.initial_cash)
     for as_of in decision_dates:
         broker.set_prices(PRICES)

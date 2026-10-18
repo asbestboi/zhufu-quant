@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
+import pytest
+
 from qr import calendars
 
 
@@ -38,6 +40,17 @@ def test_last_completed_session_for_crypto_is_yesterday_utc() -> None:
     assert calendars.last_completed_session("crypto", datetime(2024, 1, 14, 0, 5)) == date(
         2024, 1, 13
     )
+
+
+def test_session_open() -> None:
+    # NYSE opens at 9:30 New York = 14:30 UTC in January.
+    assert calendars.session_open("etf", date(2024, 1, 16)) == datetime(2024, 1, 16, 14, 30)
+    assert calendars.session_open("crypto", date(2024, 1, 16)) == datetime(2024, 1, 16, 0, 0)
+
+
+def test_session_open_rejects_a_non_session_day() -> None:
+    with pytest.raises(ValueError, match="not a NYSE session"):
+        calendars.session_open("etf", date(2024, 1, 13))  # Saturday
 
 
 def test_sessions_back() -> None:

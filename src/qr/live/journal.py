@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS live_decisions (
   updated_at TIMESTAMP NOT NULL,
   status TEXT NOT NULL,             -- 'planned' | 'submitted' | 'completed' | 'failed'
   target_weights_json TEXT NOT NULL,
-  equity DOUBLE,
+  equity DOUBLE,                    -- managed capital (LiveConfig.capital_limit), not
+                                     -- the account's total equity
   cash_buffer DOUBLE,
   data_hash TEXT,
   qr_commit TEXT,

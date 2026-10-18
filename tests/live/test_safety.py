@@ -11,6 +11,7 @@ from qr.live.broker import PriceQuote
 from qr.live.planner import PlannedOrder
 from qr.live.safety import (
     SafetyViolation,
+    check_capital_limit,
     check_kill_switch,
     check_no_short_no_leverage,
     check_order_limits,
@@ -20,6 +21,8 @@ from qr.live.safety import (
     run_safety_checks,
 )
 from qr.live.sim_broker import SimBroker
+
+from .live_helpers import make_account
 
 
 class _LiveBroker(SimBroker):
@@ -85,16 +88,41 @@ def test_leverage_limit() -> None:
 
 def test_max_single_order_value() -> None:
     orders = [order(quantity=10, price=100.0)]  # $1,000
-    check_order_limits(orders, equity=10_000, max_order_value=0.5)
+    check_order_limits(orders, capital=10_000, max_order_value=0.5)
     with pytest.raises(SafetyViolation, match="max-single-order-value"):
-        check_order_limits(orders, equity=10_000, max_order_value=0.05)
+        check_order_limits(orders, capital=10_000, max_order_value=0.05)
 
 
 def test_max_total_turnover() -> None:
     orders = [order("AAA", quantity=5, price=100.0), order("BBB", quantity=5, price=100.0)]
-    check_order_limits(orders, equity=10_000, max_order_value=1.0, max_total_turnover=1.2)
+    check_order_limits(orders, capital=10_000, max_order_value=1.0, max_total_turnover=1.2)
     with pytest.raises(SafetyViolation, match="turnover"):
-        check_order_limits(orders, equity=500, max_order_value=1.0, max_total_turnover=1.2)
+        check_order_limits(orders, capital=500, max_order_value=1.0, max_total_turnover=1.2)
+
+
+def test_capital_limit_passes_a_plan_within_capital() -> None:
+    account = make_account(cash=10_000.0)
+    orders = [order("AAA", quantity=10, price=100.0)]  # target_weight 0.1 -> $1,000 of $10,000
+    check_capital_limit(orders, account, 10_000.0)
+
+
+def test_capital_limit_rejects_a_plan_that_would_exceed_it() -> None:
+    account = make_account(cash=10_000.0)
+    big = PlannedOrder(
+        symbol="AAA", side="buy", quantity=150, price=100.0, estimated_value=15_000.0,
+        current_weight=0.0, target_weight=1.5,
+    )  # fmt: skip
+    with pytest.raises(SafetyViolation, match="managed-capital limit"):
+        check_capital_limit([big], account, 10_000.0)
+
+
+def test_capital_limit_counts_held_positions_not_in_this_plan() -> None:
+    # BBB is already fully invested; a new order for AAA would push total exposure over
+    # the limit even though AAA's own target weight looks small.
+    account = make_account(cash=0.0, positions={"BBB": (100.0, 100.0)})  # $10,000 held
+    orders = [order("AAA", quantity=10, price=100.0)]  # another $1,000
+    with pytest.raises(SafetyViolation, match="managed-capital limit"):
+        check_capital_limit(orders, account, 10_000.0)
 
 
 def test_stale_price_is_rejected() -> None:
@@ -121,7 +149,8 @@ def test_run_safety_checks_runs_the_paper_guard_before_anything_else(tmp_path: P
             target_weights={},
             allowed_symbols=[],
             orders=[],
-            equity=0.0,
+            account=make_account(cash=0.0),
+            capital=0.0,
         )
 
 
@@ -132,5 +161,6 @@ def test_run_safety_checks_passes_a_clean_plan(tmp_path: Path) -> None:
         target_weights={"AAA": 0.5},
         allowed_symbols=["AAA", "BBB"],
         orders=[order(quantity=5, price=100.0)],
-        equity=10_000.0,
+        account=make_account(cash=10_000.0),
+        capital=10_000.0,
     )
