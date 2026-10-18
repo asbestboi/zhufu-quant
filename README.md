@@ -888,6 +888,57 @@ then lost 1.4% a year in the test (Sharpe −0.14), against 22% a year for SPY. 
 same parameters, no comparison pair made money after costs in all three periods; which
 pair "worked" changed from period to period like noise.
 
+## Paper trading (`qr.live`)
+
+Step 4: a monthly decision cycle that sizes target weights into orders and sends them to
+a broker, **paper (simulated) money only, never real**. One config per strategy:
+
+```yaml
+name: my-strategy
+strategy: xs_momentum
+universe: [AAA, BBB, CCC]
+broker: sim                 # sim (default, offline) or ibkr
+capital_limit: 10000        # managed capital, in the account's base currency --
+                             # plans, safety checks, and reports all use this, never the
+                             # account's total equity (a paper account can hold far more)
+cash_buffer: 0.01
+```
+
+```
+qr live run CONFIG.yaml --dry-run    # plan + safety checks, sends nothing
+qr live run CONFIG.yaml              # plans, prints, asks to confirm, then sends
+qr live status CONFIG.yaml           # kill switch, broker account and positions, latest decision
+qr live report CONFIG.yaml           # what was decided, sent, and filled this month
+qr live kill / unkill                # refuse to send orders until unkill
+```
+
+A decision is always recomputed fresh from the frozen target weights and the broker's
+current state, keyed by `strategy:decision_date`, so a retry after a crash is safe.
+`is_paper` is read from the broker's own account, never from a config flag: for IBKR,
+the account id (Interactive Brokers always starts a paper account's id with `DU`) and
+the port connected on (4002/7497, never the live 4001/7496) both have to check out, or
+every order is refused.
+
+### IB Gateway setup (Arch Linux)
+
+`broker: ibkr` needs a running IB Gateway, and `ib_async` (`uv sync --extra live`).
+`qr.live.ibkr` never asks for or stores your IB credentials -- IB Gateway handles its
+own login, and only ever hands `qr` a host, a port, and a client id.
+
+1. Install IB Gateway (AUR: `yay -S ibkr-gateway`, or download the Linux installer
+   from Interactive Brokers and run it under `~/Jts`).
+2. Launch it and log in to your **paper** account (its username has a `p` or similar
+   paper suffix on IBKR's login page -- check which account you're in before continuing).
+3. In the Gateway's own window: **Configure -> Settings -> API -> Settings**, enable
+   "Enable ActiveX and Socket Clients", set the **Socket port** to `4002` (the paper
+   port; never point this at 4001), and add `127.0.0.1` to "Trusted IPs".
+4. Leave "Read-Only API" unchecked (orders need write access), and turn off "Auto
+   restart"'s overnight prompt if you'll run `qr live` unattended.
+5. In your `live.yaml`, set `broker: ibkr` (host/port/client_id default to
+   `127.0.0.1`/`4002`/`1`; override under an `ibkr:` block if you run more than one
+   Gateway or client). Then `qr live status CONFIG.yaml` should show the paper account
+   and its positions (empty is fine on a fresh account).
+
 ## How it works
 
 ```

@@ -93,6 +93,9 @@ def test_run_approve_then_status_and_report(
     status = runner.invoke(app, ["live", "status", str(config_path), "--data-dir", str(tmp_path)])
     assert status.exit_code == 0, status.output
     assert "Latest decision" in status.output
+    assert "Broker: sim" in status.output
+    assert "Positions" in status.output
+    assert "AAA" in status.output and "BBB" in status.output
 
     report = runner.invoke(
         app,

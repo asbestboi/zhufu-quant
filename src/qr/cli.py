@@ -36,8 +36,10 @@ from qr.ingest import FAILED, PARTIAL, run_ingest
 from qr.live import journal as live_journal
 from qr.live import report as live_report
 from qr.live import safety as live_safety
+from qr.live.broker import Broker
 from qr.live.config import LiveConfig, load_live_config
 from qr.live.cycle import run_cycle
+from qr.live.ibkr import IBKRBroker
 from qr.live.sim_broker import SimBroker
 from qr.load import get_bars
 from qr.research.holdout import HoldoutError, SealedResult
@@ -1042,10 +1044,17 @@ def _sim_account_path(config: LiveConfig, data_dir: Path | None) -> Path:
     return Path(working_dir) / f"sim_{config.name}.json"
 
 
-def _live_broker(config: LiveConfig, data_dir: Path | None) -> SimBroker:
-    if config.broker != "sim":
-        raise _fail(f"broker '{config.broker}' is not wired up yet; only 'sim' is available")
-    return SimBroker.load(_sim_account_path(config, data_dir), initial_cash=config.initial_cash)
+def _live_broker(config: LiveConfig, data_dir: Path | None) -> Broker:
+    if config.broker == "sim":
+        return SimBroker.load(_sim_account_path(config, data_dir), initial_cash=config.initial_cash)
+    if config.broker == "ibkr":
+        return IBKRBroker(
+            host=config.ibkr.host,
+            port=config.ibkr.port,
+            client_id=config.ibkr.client_id,
+            limit_buffer=config.ibkr.limit_buffer,
+        )
+    raise _fail(f"broker '{config.broker}' is not wired up yet")
 
 
 def _latest_prices(symbols: list[str], data_dir: Path | None) -> dict[str, float]:
@@ -1065,7 +1074,9 @@ def _print_plan(plan: Any) -> None:
     if not plan.orders and not plan.skipped:
         console.print("Nothing to trade.")
         return
-    table = Table(title=f"Plan (equity ${plan.equity:,.2f}, cash buffer {plan.cash_buffer:.1%})")
+    table = Table(
+        title=f"Plan (managed capital ${plan.capital:,.2f}, cash buffer {plan.cash_buffer:.1%})"
+    )
     for column in ("symbol", "side", "qty", "price", "value", "from", "to"):
         table.add_column(column, justify="right" if column not in ("symbol", "side") else "left")
     for order in plan.orders:
@@ -1098,6 +1109,8 @@ def live_run(
     """
     config = _live_config(config_file)
     broker = _live_broker(config, data_dir)
+    if not isinstance(broker, SimBroker):
+        raise _fail("`live run` only supports the sim broker for now; use `live status` for ibkr")
     broker.set_prices(_latest_prices(config.universe, data_dir))
     planned = run_cycle(config, broker, dry_run=True, catch_up=catch_up, data_dir=data_dir)
     if planned.status == "no_decision":
@@ -1136,6 +1149,24 @@ def live_status(
         os.environ.get(live_safety.KILL_ENV_VAR) == "1"
     )
     console.print(f"Kill switch: {'[red]ENGAGED[/red]' if killed else 'off'}")
+
+    broker = _live_broker(config, data_dir)
+    paper = "[green]paper[/green]" if broker.is_paper else "[red]NOT PAPER[/red]"
+    console.print(f"Broker: {config.broker}  account {broker.account_id}  ({paper})")
+    account = broker.account()
+    console.print(f"Cash: ${account.cash:,.2f}   Equity: ${account.equity:,.2f}")
+    if account.positions:
+        positions_table = Table(title="Positions")
+        for column in ("symbol", "quantity", "avg_cost", "market_value"):
+            positions_table.add_column(column, justify="left" if column == "symbol" else "right")
+        for symbol, position in sorted(account.positions.items()):
+            positions_table.add_row(
+                symbol, f"{position.quantity:g}", f"{position.avg_cost:.2f}",
+                f"{position.market_value:,.2f}",
+            )  # fmt: skip
+        console.print(positions_table)
+    else:
+        console.print("No open positions.")
 
     decisions = live_journal.read_decisions(config.strategy, data_directory=data_dir)
     if decisions.empty:

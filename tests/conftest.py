@@ -24,15 +24,20 @@ AFTER_JAN_16 = datetime(2024, 1, 17, 0, 0, 0)
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption("--run-network", action="store_true", help="run tests that hit providers")
+    parser.addoption("--run-ibkr", action="store_true", help="run tests against a real IB Gateway")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    if config.getoption("--run-network"):
-        return
-    skip = pytest.mark.skip(reason="needs --run-network")
-    for item in items:
-        if "network" in item.keywords:
-            item.add_marker(skip)
+    skips = {
+        "network": pytest.mark.skip(reason="needs --run-network"),
+        "ibkr": pytest.mark.skip(reason="needs --run-ibkr"),
+    }
+    for keyword, skip in skips.items():
+        if config.getoption(f"--run-{keyword}"):
+            continue
+        for item in items:
+            if keyword in item.keywords:
+                item.add_marker(skip)
 
 
 @pytest.fixture(params=["python", "rust"])

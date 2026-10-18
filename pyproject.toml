@@ -23,6 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 crypto = ["ccxt>=4.4"]
+live = ["ib_async>=1.0.3"]
 
 [project.scripts]
 qr = "qr.cli:app"
@@ -50,7 +51,10 @@ packages = ["src/qr"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["network: hits a real data provider (skipped unless --run-network is given)"]
+markers = [
+    "network: hits a real data provider (skipped unless --run-network is given)",
+    "ibkr: hits a real IB Gateway paper account (skipped unless --run-ibkr is given)",
+]
 
 [tool.ruff]
 line-length = 100
@@ -66,5 +70,5 @@ strict = true
 files = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["yfinance.*", "ccxt.*", "pandas_market_calendars.*", "statsmodels.*"]
+module = ["yfinance.*", "ccxt.*", "pandas_market_calendars.*", "statsmodels.*", "ib_async.*"]
 ignore_missing_imports = true
