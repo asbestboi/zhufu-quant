@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -32,6 +33,12 @@ from qr.config import (
     raw_dir,
 )
 from qr.ingest import FAILED, PARTIAL, run_ingest
+from qr.live import journal as live_journal
+from qr.live import report as live_report
+from qr.live import safety as live_safety
+from qr.live.config import LiveConfig, load_live_config
+from qr.live.cycle import run_cycle
+from qr.live.sim_broker import SimBroker
 from qr.load import get_bars
 from qr.research.holdout import HoldoutError, SealedResult
 from qr.research.sweeps import SweepSummary
@@ -1014,6 +1021,173 @@ def _print_sweep(summary: SweepSummary) -> None:
 
 def _maybe(value: Any) -> float | None:
     return None if value is None or pd.isna(value) else float(value)
+
+
+live_app = typer.Typer(
+    help="The paper-trading monthly cycle (sim broker only for now; never real money).",
+    no_args_is_help=True,
+)
+app.add_typer(live_app, name="live")
+
+
+def _live_config(config_file: Path) -> LiveConfig:
+    try:
+        return load_live_config(config_file)
+    except ConfigError as exc:
+        raise _fail(str(exc)) from exc
+
+
+def _sim_account_path(config: LiveConfig, data_dir: Path | None) -> Path:
+    working_dir = data_dir or config.working_dir
+    return Path(working_dir) / f"sim_{config.name}.json"
+
+
+def _live_broker(config: LiveConfig, data_dir: Path | None) -> SimBroker:
+    if config.broker != "sim":
+        raise _fail(f"broker '{config.broker}' is not wired up yet; only 'sim' is available")
+    return SimBroker.load(_sim_account_path(config, data_dir), initial_cash=config.initial_cash)
+
+
+def _latest_prices(symbols: list[str], data_dir: Path | None) -> dict[str, float]:
+    """Each symbol's most recently stored unadjusted close.
+
+    The sim broker has no live feed of its own; this is the same price basis the
+    backtester sizes a trade at (:meth:`qr.backtest.event_engine.PythonCore._last_close`).
+    """
+    bars = get_bars(symbols, end=date.today(), adjustment="none", data_dir=data_dir)
+    if bars.empty:
+        return {}
+    closes = bars["close"].groupby(level="symbol").last()
+    return {str(symbol): float(price) for symbol, price in closes.items()}
+
+
+def _print_plan(plan: Any) -> None:
+    if not plan.orders and not plan.skipped:
+        console.print("Nothing to trade.")
+        return
+    table = Table(title=f"Plan (equity ${plan.equity:,.2f}, cash buffer {plan.cash_buffer:.1%})")
+    for column in ("symbol", "side", "qty", "price", "value", "from", "to"):
+        table.add_column(column, justify="right" if column not in ("symbol", "side") else "left")
+    for order in plan.orders:
+        table.add_row(
+            order.symbol, order.side, f"{order.quantity:g}", f"{order.price:.2f}",
+            f"{order.estimated_value:,.2f}", f"{order.current_weight:.1%}",
+            f"{order.target_weight:.1%}",
+        )  # fmt: skip
+    console.print(table)
+    for symbol, reason in plan.skipped.items():
+        console.print(f"  skipped {symbol}: {reason}")
+
+
+@live_app.command("run")
+def live_run(
+    config_file: Annotated[Path, typer.Argument(help="Live config (YAML).")],
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Plan and run safety checks, but send nothing.")
+    ] = False,
+    catch_up: Annotated[
+        bool, typer.Option("--catch-up", help="Also act on a recent missed month-end.")
+    ] = False,
+    data_dir: DataDirOption = None,
+) -> None:
+    """Run one monthly decision: plan, check, and (unless ``--dry-run``) send orders.
+
+    Without ``--dry-run`` the plan is printed and you are asked to approve it before
+    anything is sent -- this is the manual-approval mode the spec requires; a scheduled,
+    unattended mode is Part 4.
+    """
+    config = _live_config(config_file)
+    broker = _live_broker(config, data_dir)
+    broker.set_prices(_latest_prices(config.universe, data_dir))
+    planned = run_cycle(config, broker, dry_run=True, catch_up=catch_up, data_dir=data_dir)
+    if planned.status == "no_decision":
+        console.print(planned.message)
+        return
+    if planned.status == "failed":
+        console.print(f"[red]{planned.message}[/red]")
+        raise _fail(planned.message)
+    if planned.status == "already_completed":
+        console.print(f"Decision {planned.decision_id} is already completed; nothing to do.")
+        return
+    assert planned.plan is not None
+    console.print(f"Decision: {planned.decision_id}")
+    _print_plan(planned.plan)
+    if dry_run:
+        return
+    if not planned.plan.orders:
+        return
+    if not typer.confirm("Send these orders to the (paper) broker?", default=False):
+        console.print("Not sending; run again with --dry-run to just inspect the plan.")
+        return
+    result = run_cycle(config, broker, approve=True, catch_up=catch_up, data_dir=data_dir)
+    broker.save(_sim_account_path(config, data_dir))
+    console.print(f"Result: {result.status}  ({result.message})")
+
+
+@live_app.command("status")
+def live_status(
+    config_file: Annotated[Path, typer.Argument(help="Live config (YAML).")],
+    data_dir: DataDirOption = None,
+) -> None:
+    """The kill switch, the latest decision, and the most recent runs."""
+    config = _live_config(config_file)
+    working_dir = Path(data_dir or config.working_dir)
+    killed = (working_dir / live_safety.KILL_FILE_NAME).exists() or (
+        os.environ.get(live_safety.KILL_ENV_VAR) == "1"
+    )
+    console.print(f"Kill switch: {'[red]ENGAGED[/red]' if killed else 'off'}")
+
+    decisions = live_journal.read_decisions(config.strategy, data_directory=data_dir)
+    if decisions.empty:
+        console.print("No decisions recorded yet.")
+    else:
+        latest = decisions.iloc[-1]
+        console.print(f"Latest decision: {latest['decision_id']}  [{latest['status']}]")
+
+    runs = live_journal.read_runs(data_directory=data_dir, limit=5)
+    if runs.empty:
+        console.print("No runs recorded yet.")
+        return
+    table = Table(title="Recent runs")
+    for column in ("run_id", "started_at", "status", "dry_run", "message"):
+        table.add_column(column)
+    for _, row in runs.iterrows():
+        table.add_row(
+            row["run_id"], str(row["started_at"]), row["status"], str(row["dry_run"]),
+            row["message"] or "",
+        )  # fmt: skip
+    console.print(table)
+
+
+@live_app.command("report")
+def live_report_cmd(
+    config_file: Annotated[Path, typer.Argument(help="Live config (YAML).")],
+    month: Annotated[
+        str | None, typer.Option("--month", help="Calendar month, YYYY-MM (default: this month).")
+    ] = None,
+    data_dir: DataDirOption = None,
+) -> None:
+    """What the strategy decided, sent, and had filled in one calendar month."""
+    config = _live_config(config_file)
+    target_month = month or pd.Timestamp.now().strftime("%Y-%m")
+    report = live_report.build_report(config.strategy, target_month, data_dir=data_dir)
+    console.print(live_report.render_text(report))
+
+
+@live_app.command("kill")
+def live_kill(data_dir: DataDirOption = None) -> None:
+    """Create the ``KILL`` file: every live cycle refuses to send orders until ``unkill``."""
+    path = Path(data_dir or Path()) / live_safety.KILL_FILE_NAME
+    path.touch()
+    console.print(f"Kill switch engaged: {path}")
+
+
+@live_app.command("unkill")
+def live_unkill(data_dir: DataDirOption = None) -> None:
+    """Remove the ``KILL`` file."""
+    path = Path(data_dir or Path()) / live_safety.KILL_FILE_NAME
+    path.unlink(missing_ok=True)
+    console.print(f"Kill switch cleared: {path}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,8 @@
+# A demo config for `qr live run --dry-run`: paper only, sim broker only. See
+# tests/live/ for the automated coverage; this is just something to point the CLI at.
+name: xs_momentum_demo
+strategy: xs_momentum
+params: { lookback: 252, skip: 21, top_n: 3 }
+universe: [SPY, QQQ, IWM, TLT, GLD]
+broker: sim
+initial_cash: 100000
