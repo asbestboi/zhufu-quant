@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from qr.config import ConfigError
 
-BrokerName = Literal["sim", "ibkr"]
+BrokerName = Literal["sim", "ibkr", "paper_ledger"]
 
 
 class _Model(BaseModel):
@@ -37,6 +37,25 @@ class IBKRConfig(_Model):
     limit_buffer: float = Field(default=0.003, ge=0, lt=1)
 
 
+class PaperLedgerConfig(_Model):
+    """Settings for ``qr.live.paper_ledger`` (``broker: paper_ledger``).
+
+    No connection settings here, unlike :class:`IBKRConfig`: this broker never leaves
+    the machine it runs on -- it fills orders by reading bars already in the local data
+    store, not from any live feed.
+    """
+
+    # How many trading sessions after a decision an order is given to fill before it's
+    # cancelled, never chased. Independent of order_window_minutes (cycle.py's wall-clock
+    # budget for a single run): this is what actually governs a paper_ledger order, in
+    # trading sessions rather than minutes, since a fill can depend on a session's bar
+    # that has not been downloaded yet by the time any one `qr live run` call returns.
+    window_sessions: int = Field(default=3, ge=1)
+    # How far through the latest close a day limit order is priced, in the order's own
+    # direction, so it has a real chance of filling at the next session's open.
+    limit_buffer: float = Field(default=0.003, ge=0, lt=1)
+
+
 class LiveConfig(_Model):
     """Everything that defines one paper-trading strategy's monthly cycle."""
 
@@ -47,6 +66,7 @@ class LiveConfig(_Model):
     rebalance: Literal["monthly"] = "monthly"
     broker: BrokerName = "sim"
     ibkr: IBKRConfig = Field(default_factory=IBKRConfig)
+    paper_ledger: PaperLedgerConfig = Field(default_factory=PaperLedgerConfig)
     initial_cash: float = Field(default=100_000.0, gt=0)  # sim broker's starting cash only
     # The account's *managed* capital, in its base currency: qr.live plans, checks, and
     # reports against this number, never the account's total equity. A paper account is

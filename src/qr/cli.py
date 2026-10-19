@@ -40,6 +40,7 @@ from qr.live.broker import Broker
 from qr.live.config import LiveConfig, load_live_config
 from qr.live.cycle import run_cycle
 from qr.live.ibkr import IBKRBroker
+from qr.live.paper_ledger import PaperLedgerBroker
 from qr.live.sim_broker import SimBroker
 from qr.load import get_bars
 from qr.research.holdout import HoldoutError, SealedResult
@@ -1026,7 +1027,7 @@ def _maybe(value: Any) -> float | None:
 
 
 live_app = typer.Typer(
-    help="The paper-trading monthly cycle (sim broker only for now; never real money).",
+    help="The paper-trading monthly cycle (sim/paper_ledger brokers for now; never real money).",
     no_args_is_help=True,
 )
 app.add_typer(live_app, name="live")
@@ -1053,6 +1054,15 @@ def _live_broker(config: LiveConfig, data_dir: Path | None) -> Broker:
             port=config.ibkr.port,
             client_id=config.ibkr.client_id,
             limit_buffer=config.ibkr.limit_buffer,
+        )
+    if config.broker == "paper_ledger":
+        return PaperLedgerBroker(
+            strategy=config.strategy,
+            universe=config.universe,
+            capital_limit=config.capital_limit,
+            window_sessions=config.paper_ledger.window_sessions,
+            limit_buffer=config.paper_ledger.limit_buffer,
+            data_dir=data_dir,
         )
     raise _fail(f"broker '{config.broker}' is not wired up yet")
 
@@ -1108,11 +1118,11 @@ def live_run(
     unattended mode is Part 4.
     """
     config = _live_config(config_file)
-    if config.broker != "sim" and not dry_run:
+    if config.broker not in ("sim", "paper_ledger") and not dry_run:
         raise _fail(
-            "`live run` only sends real orders through the sim broker for now (Part 2b's "
-            "order-lifecycle tracking for other brokers isn't merged yet); pass --dry-run "
-            f"to preview a plan and safety checks against broker: {config.broker}"
+            "`live run` only sends real orders through the sim and paper_ledger brokers for "
+            "now (Part 2b's order-lifecycle tracking for other brokers isn't merged yet); "
+            f"pass --dry-run to preview a plan and safety checks against broker: {config.broker}"
         )
     broker = _live_broker(config, data_dir)
     if isinstance(broker, SimBroker):

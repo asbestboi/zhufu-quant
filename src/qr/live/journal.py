@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS live_fills (
   quantity DOUBLE NOT NULL,
   price DOUBLE NOT NULL,
   commission DOUBLE NOT NULL,
-  filled_at TIMESTAMP NOT NULL
+  filled_at TIMESTAMP NOT NULL,
+  data_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS live_positions (
@@ -112,6 +113,9 @@ def init_schema(data_directory: Path | str | None = None) -> None:
     """Create the journal database and its tables, if they do not exist yet."""
     with storage.connect(journal_path(data_directory)) as con:
         con.execute(SCHEMA)
+        # Added after live_fills first shipped; a fresh CREATE TABLE above does not
+        # retroactively alter an existing one, so an older journal needs this too.
+        con.execute("ALTER TABLE live_fills ADD COLUMN IF NOT EXISTS data_hash TEXT")
 
 
 @dataclass(frozen=True)
@@ -310,6 +314,48 @@ def read_orders(did: str, data_directory: Path | str | None = None) -> pd.DataFr
         ).df()
 
 
+def find_order(order_id: str, data_directory: Path | str | None = None) -> pd.Series | None:
+    """The journaled order with this id, if any, looked up across every decision.
+
+    For a broker with no in-memory state of its own across a process restart (e.g.
+    :mod:`qr.live.paper_ledger`), this is how it re-derives an order's symbol, side,
+    quantity, and decision from just the id it was given back when it placed it.
+    """
+    path = journal_path(data_directory)
+    if not path.exists():
+        return None
+    with storage.connect(path, read_only=True) as con:
+        frame = con.execute("SELECT * FROM live_orders WHERE order_id = ?", [order_id]).df()
+    return None if frame.empty else frame.iloc[0]
+
+
+def read_orders_for_strategy(
+    strategy: str, data_directory: Path | str | None = None
+) -> pd.DataFrame:
+    """Every order ever journaled for any of ``strategy``'s decisions, submission order."""
+    path = journal_path(data_directory)
+    columns = [
+        "order_id",
+        "decision_id",
+        "symbol",
+        "side",
+        "quantity",
+        "planned_price",
+        "submitted_at",
+        "status",
+    ]
+    if not path.exists():
+        return pd.DataFrame(columns=columns)
+    with storage.connect(path, read_only=True) as con:
+        return con.execute(
+            """
+            SELECT o.* FROM live_orders o JOIN live_decisions d ON o.decision_id = d.decision_id
+            WHERE d.strategy = ? ORDER BY o.submitted_at
+            """,
+            [strategy],
+        ).df()
+
+
 def record_fill(
     order_id: str,
     did: str,
@@ -319,17 +365,24 @@ def record_fill(
     price: float,
     commission: float,
     *,
+    data_hash: str | None = None,
     filled_at: datetime | None = None,
     data_directory: Path | str | None = None,
 ) -> None:
-    """Append one row to ``live_fills``, idempotently keyed by the order (one fill each)."""
+    """Append one row to ``live_fills``, idempotently keyed by the order (one fill each).
+
+    ``data_hash`` identifies exactly the market data a broker relied on to decide this
+    fill (:func:`qr.load.fingerprint`), when it has one -- ``None`` for a broker with no
+    such notion (the sim and IBKR brokers).
+    """
     init_schema(data_directory)
     with storage.connect(journal_path(data_directory)) as con:
         con.execute(
             """
             INSERT INTO live_fills
-              (fill_id, order_id, decision_id, symbol, side, quantity, price, commission, filled_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              (fill_id, order_id, decision_id, symbol, side, quantity, price, commission,
+               filled_at, data_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (fill_id) DO NOTHING
             """,
             [
@@ -342,8 +395,19 @@ def record_fill(
                 price,
                 commission,
                 filled_at or storage.utcnow(),
+                data_hash,
             ],
         )
+
+
+def find_fill_by_order(order_id: str, data_directory: Path | str | None = None) -> pd.Series | None:
+    """The fill journaled for this order id, if the order has one."""
+    path = journal_path(data_directory)
+    if not path.exists():
+        return None
+    with storage.connect(path, read_only=True) as con:
+        frame = con.execute("SELECT * FROM live_fills WHERE order_id = ?", [order_id]).df()
+    return None if frame.empty else frame.iloc[0]
 
 
 def read_fills(did: str, data_directory: Path | str | None = None) -> pd.DataFrame:
@@ -361,11 +425,46 @@ def read_fills(did: str, data_directory: Path | str | None = None) -> pd.DataFra
                 "price",
                 "commission",
                 "filled_at",
+                "data_hash",
             ]
         )
     with storage.connect(path, read_only=True) as con:
         return con.execute(
             "SELECT * FROM live_fills WHERE decision_id = ? ORDER BY filled_at", [did]
+        ).df()
+
+
+def read_fills_for_strategy(
+    strategy: str, data_directory: Path | str | None = None
+) -> pd.DataFrame:
+    """Every fill ever journaled for any of ``strategy``'s decisions, oldest first.
+
+    Used to rebuild a strategy's whole position history (e.g.
+    :meth:`qr.live.paper_ledger.PaperLedgerBroker.account`), unlike :func:`read_fills`,
+    which is scoped to one decision.
+    """
+    path = journal_path(data_directory)
+    columns = [
+        "fill_id",
+        "order_id",
+        "decision_id",
+        "symbol",
+        "side",
+        "quantity",
+        "price",
+        "commission",
+        "filled_at",
+        "data_hash",
+    ]
+    if not path.exists():
+        return pd.DataFrame(columns=columns)
+    with storage.connect(path, read_only=True) as con:
+        return con.execute(
+            """
+            SELECT f.* FROM live_fills f JOIN live_decisions d ON f.decision_id = d.decision_id
+            WHERE d.strategy = ? ORDER BY f.filled_at
+            """,
+            [strategy],
         ).df()
 
 

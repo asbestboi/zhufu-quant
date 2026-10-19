@@ -897,7 +897,7 @@ a broker, **paper (simulated) money only, never real**. One config per strategy:
 name: my-strategy
 strategy: xs_momentum
 universe: [AAA, BBB, CCC]
-broker: sim                 # sim (default, offline) or ibkr
+broker: sim                 # sim (default, offline), ibkr, or paper_ledger
 capital_limit: 10000        # managed capital, in the account's base currency --
                              # plans, safety checks, and reports all use this, never the
                              # account's total equity (a paper account can hold far more)
@@ -929,6 +929,40 @@ control -- a later call (manual, or Part 4's scheduler) resumes polling the same
 never resubmitting them, until the window itself ends. Until Part 2b's order-lifecycle
 tracking is merged, `qr live run` refuses to send real orders through `broker: ibkr`
 (pass `--dry-run` to preview a plan and safety checks against it in the meantime).
+
+### The paper ledger broker (`broker: paper_ledger`)
+
+`qr.live.paper_ledger.PaperLedgerBroker` is the broker the forward test uses. It never
+leaves this machine -- there is no network client in that module at all -- and keeps no
+state of its own: its account, orders, and fills are all rebuilt, every call, from the
+journal and the local data store, so a crash or a plain restart is always safe to resume.
+
+An order fills at the next session's open if the limit allows it, or at the limit itself
+if a later session trades through it within `paper_ledger.window_sessions` sessions
+(default 3) of the decision -- the same matching the backtester's own `broker_sim` does,
+with the same `qr.backtest.costs.CostModel` applied (commission, spread, slippage). If
+the bar a fill decision needs has not been downloaded yet, the order simply stays open
+for a later run to resolve, which is exactly `order_poll_interval_seconds`/
+`order_window_minutes`'s existing resumable-order machinery -- set these generously for
+`paper_ledger` (e.g. a short poll interval and a window measured in days, not minutes),
+since a session's bar can take a while to actually exist. Every fill is recorded with
+the SHA-256 of exactly the bar it was decided from (`qr.load.fingerprint`), so the same
+orders replayed against the same data always produce the same fills. Selling more than
+is currently held is refused outright, never sent as a short.
+
+```yaml
+broker: paper_ledger
+paper_ledger:
+  window_sessions: 3     # sessions after a decision an order gets before it's cancelled
+  limit_buffer: 0.003     # 0.3% through the latest close, same convention as ibkr.limit_buffer
+```
+
+It trades the 12 US-listed research ETFs directly (`config/universe.yaml`'s `etf`
+group: SPY, IWM, EFA, EEM, VNQ, TLT, IEF, LQD, TIP, GLD, DBC, SHY) -- there is no UCITS
+mapping anywhere in this package. **A real-money account based in the EU could not buy
+these tickers as listed**; it would need the UCITS-domiciled equivalent of each fund
+(e.g. a UCITS ETF tracking the same index), which is a decision for whoever runs that
+account to make deliberately, not something this broker should guess at.
 
 ### IB Gateway setup (Arch Linux)
 

@@ -136,6 +136,33 @@ def test_run_refuses_a_real_send_against_ibkr_but_allows_dry_run(tmp_path: Path)
     assert "--dry-run" not in dry_run.output  # got past the gate; failed trying to connect
 
 
+def test_paper_ledger_broker_is_not_gated_and_status_reports_it(tmp_path: Path) -> None:
+    config_path, _ = _seeded_config(tmp_path)
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "cli-test",
+                "strategy": "buy_and_hold",
+                "universe": ["AAA", "BBB"],
+                "broker": "paper_ledger",
+                "capital_limit": 10_000.0,
+                "cash_buffer": 0.0,
+                "min_trade_weight": 0.0,
+                "working_dir": str(tmp_path),
+            }
+        )
+    )
+    # Never gated behind --dry-run (unlike ibkr): it never leaves this machine.
+    run = runner.invoke(app, ["live", "run", str(config_path), "--data-dir", str(tmp_path)])
+    assert "--dry-run" not in run.output
+
+    status = runner.invoke(app, ["live", "status", str(config_path), "--data-dir", str(tmp_path)])
+    assert status.exit_code == 0, status.output
+    assert "paper_ledger" in status.output
+    assert "paper" in status.output
+    assert "Cash: $10,000.00" in status.output
+
+
 def test_kill_and_unkill(tmp_path: Path) -> None:
     killed = runner.invoke(app, ["live", "kill", "--data-dir", str(tmp_path)])
     assert killed.exit_code == 0
