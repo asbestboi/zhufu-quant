@@ -52,6 +52,7 @@ AWAITING_APPROVAL = "awaiting_approval"
 SUBMITTED = "submitted"
 COMPLETED = "completed"
 ALREADY_COMPLETED = "already_completed"
+ALREADY_EXPIRED = "already_expired"
 FAILED = "failed"
 
 
@@ -96,7 +97,7 @@ def _pending_month_end(
     for day in reversed(candidates):
         if is_month_end(day):
             existing = journal.find_decision(strategy, day, data_directory=data_dir)
-            if existing is None or existing.status != journal.COMPLETED:
+            if existing is None or existing.status not in (journal.COMPLETED, journal.EXPIRED):
                 return day
     return None
 
@@ -296,6 +297,13 @@ def run_cycle(
         if decision is not None and decision.status == journal.COMPLETED:
             journal.finish_run(run_id, "ok", message="already completed", data_directory=data_dir)
             return CycleResult(run_id, ALREADY_COMPLETED, decision.decision_id)
+        if decision is not None and decision.status == journal.EXPIRED:
+            # The plan expired unapproved (qr.live.schedule's maintenance pass); per the
+            # pre-registration's own missed-decision rule, no orders are ever sent for
+            # this month after that, however this cycle is invoked again.
+            message = "plan expired unapproved; no orders sent for this decision"
+            journal.finish_run(run_id, "ok", message=message, data_directory=data_dir)
+            return CycleResult(run_id, ALREADY_EXPIRED, decision.decision_id, message=message)
 
         if decision is None:
             weights = target_weights(

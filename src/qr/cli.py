@@ -33,9 +33,12 @@ from qr.config import (
     raw_dir,
 )
 from qr.ingest import FAILED, PARTIAL, run_ingest
+from qr.live import dashboard as live_dashboard
 from qr.live import journal as live_journal
+from qr.live import notify as live_notify
 from qr.live import report as live_report
 from qr.live import safety as live_safety
+from qr.live import schedule as live_schedule
 from qr.live.broker import Broker
 from qr.live.config import LiveConfig, load_live_config
 from qr.live.cycle import run_cycle
@@ -1100,6 +1103,31 @@ def _print_plan(plan: Any) -> None:
         console.print(f"  skipped {symbol}: {reason}")
 
 
+def _print_maintenance(events: list[live_schedule.MaintenanceEvent], config: LiveConfig) -> None:
+    for event in events:
+        console.print(f"[yellow]{event.message}[/yellow]")
+        live_notify.send(f"{config.name}: missed decision", event.message)
+
+
+def _resolve_open_decisions(config: LiveConfig, broker: Broker, data_dir: Path | None) -> list[str]:
+    """Resume polling/resolving every decision of this strategy still ``submitted``.
+
+    Independent of whatever decision today's own run is about: a daily run must also
+    settle yesterday's still-open paper_ledger orders, whose fills can depend on bars
+    that were only just downloaded -- paper_ledger's own resumable-order-lifecycle
+    design (see `qr.live.paper_ledger`). A harmless no-op for any other broker, since
+    resuming an already-terminal decision does nothing.
+    """
+    resumed = []
+    decisions = live_journal.read_decisions(config.strategy, data_directory=data_dir)
+    submitted = decisions[decisions["status"] == live_journal.SUBMITTED]
+    for _, row in submitted.iterrows():
+        as_of = pd.Timestamp(row["decision_date"]).date()
+        result = run_cycle(config, broker, approve=True, as_of=as_of, data_dir=data_dir)
+        resumed.append(f"{result.decision_id}: {result.status}")
+    return resumed
+
+
 @live_app.command("run")
 def live_run(
     config_file: Annotated[Path, typer.Argument(help="Live config (YAML).")],
@@ -1113,9 +1141,13 @@ def live_run(
 ) -> None:
     """Run one monthly decision: plan, check, and (unless ``--dry-run``) send orders.
 
-    Without ``--dry-run`` the plan is printed and you are asked to approve it before
-    anything is sent -- this is the manual-approval mode the spec requires; a scheduled,
-    unattended mode is Part 4.
+    Every call first runs a maintenance pass (`qr.live.schedule`): expiring any plan left
+    unapproved too long, and flagging a month-end nobody ever ran -- both alerted and,
+    unless `--dry-run`, resolves any of this strategy's still-``submitted`` decisions
+    (a daily run settling yesterday's open paper_ledger orders), before planning today's
+    own decision. With a terminal attached, a plan awaiting approval is printed and you
+    are asked to confirm before anything is sent; without one (a systemd timer has no
+    terminal to confirm in), it is left `planned` and waits for `qr live approve`.
     """
     config = _live_config(config_file)
     if config.broker not in ("sim", "paper_ledger") and not dry_run:
@@ -1124,33 +1156,126 @@ def live_run(
             "now (Part 2b's order-lifecycle tracking for other brokers isn't merged yet); "
             f"pass --dry-run to preview a plan and safety checks against broker: {config.broker}"
         )
+    _print_maintenance(live_schedule.run_maintenance(config, data_dir), config)
+
     broker = _live_broker(config, data_dir)
     if isinstance(broker, SimBroker):
         broker.set_prices(_latest_prices(config.universe, data_dir))
-    planned = run_cycle(config, broker, dry_run=True, catch_up=catch_up, data_dir=data_dir)
-    if planned.status == "no_decision":
-        console.print(planned.message)
+    try:
+        if not dry_run:
+            for note in _resolve_open_decisions(config, broker, data_dir):
+                console.print(f"Resumed {note}")
+
+        planned = run_cycle(config, broker, dry_run=True, catch_up=catch_up, data_dir=data_dir)
+        if planned.status == "no_decision":
+            console.print(planned.message)
+            return
+        if planned.status == "failed":
+            console.print(f"[red]{planned.message}[/red]")
+            raise _fail(planned.message)
+        if planned.status == "already_completed":
+            console.print(f"Decision {planned.decision_id} is already completed; nothing to do.")
+            return
+        if planned.status == "already_expired":
+            console.print(f"[yellow]Decision {planned.decision_id} already expired; "
+                           f"{planned.message}[/yellow]")  # fmt: skip
+            return
+        assert planned.plan is not None
+        console.print(f"Decision: {planned.decision_id}")
+        _print_plan(planned.plan)
+        if dry_run:
+            return
+
+        if planned.status == "submitted" or not planned.plan.orders:
+            # Already approved earlier (just resuming/resolving), or nothing needs
+            # approval because there is nothing to trade -- either way, no new human
+            # decision is due.
+            result = run_cycle(config, broker, approve=True, catch_up=catch_up, data_dir=data_dir)
+            console.print(f"Result: {result.status}  ({result.message})")
+            return
+
+        try:
+            approved = typer.confirm("Send these orders to the (paper) broker?", default=False)
+        except typer.Abort:
+            # No input to read at all (a systemd timer's stdin, never a terminal): leave
+            # it `planned` and wait for `qr live approve`, instead of hanging or refusing.
+            console.print(
+                "Awaiting approval (no input available) -- run "
+                f"`qr live approve {config_file}` within 3 trading days; the plan "
+                "expires unapproved after that."
+            )
+            live_notify.send(
+                f"{config.name}: plan awaiting approval", f"qr live approve {config_file}"
+            )
+            return
+        if not approved:
+            console.print("Not sending; run again, or `qr live approve`, when ready.")
+            return
+        result = run_cycle(config, broker, approve=True, catch_up=catch_up, data_dir=data_dir)
+        console.print(f"Result: {result.status}  ({result.message})")
+    finally:
+        if not dry_run:
+            if isinstance(broker, SimBroker):
+                broker.save(_sim_account_path(config, data_dir))
+            live_dashboard.write_dashboard(config, data_dir)
+
+
+@live_app.command("approve")
+def live_approve(
+    config_file: Annotated[Path, typer.Argument(help="Live config (YAML).")],
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the interactive confirmation.")] = False,
+    data_dir: DataDirOption = None,
+) -> None:
+    """Approve the plan awaiting approval, and send its orders.
+
+    The counterpart to an unattended `qr live run`: when a scheduled run prepares a plan
+    with no terminal to confirm in, it leaves the decision `planned` and waits here. A
+    plan left unapproved for more than 3 trading days has already expired (this runs the
+    same maintenance pass `qr live run` does, first) and is refused rather than sent.
+    """
+    config = _live_config(config_file)
+    _print_maintenance(live_schedule.run_maintenance(config, data_dir), config)
+
+    pending = live_journal.find_latest_by_status(
+        config.strategy, live_journal.PLANNED, data_directory=data_dir
+    )
+    if pending is None:
+        console.print("No plan is awaiting approval.")
         return
-    if planned.status == "failed":
-        console.print(f"[red]{planned.message}[/red]")
-        raise _fail(planned.message)
-    if planned.status == "already_completed":
-        console.print(f"Decision {planned.decision_id} is already completed; nothing to do.")
-        return
-    assert planned.plan is not None
-    console.print(f"Decision: {planned.decision_id}")
-    _print_plan(planned.plan)
-    if dry_run:
-        return
-    if not planned.plan.orders:
-        return
-    if not typer.confirm("Send these orders to the (paper) broker?", default=False):
-        console.print("Not sending; run again with --dry-run to just inspect the plan.")
-        return
-    result = run_cycle(config, broker, approve=True, catch_up=catch_up, data_dir=data_dir)
+
+    broker = _live_broker(config, data_dir)
     if isinstance(broker, SimBroker):
-        broker.save(_sim_account_path(config, data_dir))
-    console.print(f"Result: {result.status}  ({result.message})")
+        broker.set_prices(_latest_prices(config.universe, data_dir))
+    try:
+        planned = run_cycle(
+            config, broker, dry_run=True, as_of=pending.decision_date, data_dir=data_dir
+        )
+        if planned.status == "failed":
+            console.print(f"[red]{planned.message}[/red]")
+            raise _fail(planned.message)
+        assert planned.plan is not None
+        console.print(f"Decision: {planned.decision_id}")
+        _print_plan(planned.plan)
+
+        if not yes:
+            try:
+                approved = typer.confirm(
+                    "Approve and send these orders to the (paper) broker?", default=False
+                )
+            except typer.Abort:
+                approved = False
+            if not approved:
+                console.print("Not approved; the plan is still awaiting approval.")
+                return
+
+        result = run_cycle(
+            config, broker, approve=True, as_of=pending.decision_date, data_dir=data_dir
+        )
+        console.print(f"Result: {result.status}  ({result.message})")
+    finally:
+        if isinstance(broker, SimBroker):
+            broker.save(_sim_account_path(config, data_dir))
+        live_dashboard.write_dashboard(config, data_dir)
 
 
 @live_app.command("status")
@@ -1212,13 +1337,63 @@ def live_report_cmd(
     month: Annotated[
         str | None, typer.Option("--month", help="Calendar month, YYYY-MM (default: this month).")
     ] = None,
+    tracking: Annotated[
+        bool,
+        typer.Option(
+            "--tracking",
+            help="The forward test's own section-8 report: reliability, consistency, "
+            "and (with a benchmark configured) shadow performance -- not just the plain "
+            "journal summary.",
+        ),
+    ] = False,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Write <out>.md and <out>.html instead of printing."),
+    ] = None,
     data_dir: DataDirOption = None,
 ) -> None:
     """What the strategy decided, sent, and had filled in one calendar month."""
     config = _live_config(config_file)
     target_month = month or pd.Timestamp.now().strftime("%Y-%m")
+    if tracking:
+        full_report = live_report.build_tracking_report(config, target_month, data_dir=data_dir)
+        text = live_report.render_tracking_markdown(full_report)
+        if out is None:
+            console.print(text)
+            return
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.with_suffix(".md").write_text(text, encoding="utf-8")
+        out.with_suffix(".html").write_text(
+            live_report.render_tracking_html(full_report), encoding="utf-8"
+        )
+        console.print(f"Wrote {out.with_suffix('.md')} and {out.with_suffix('.html')}")
+        return
     report = live_report.build_report(config.strategy, target_month, data_dir=data_dir)
-    console.print(live_report.render_text(report))
+    text = live_report.render_text(report)
+    if out is None:
+        console.print(text)
+        return
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.with_suffix(".md").write_text(text, encoding="utf-8")
+    console.print(f"Wrote {out.with_suffix('.md')}")
+
+
+@live_app.command("dashboard")
+def live_dashboard_cmd(
+    config_file: Annotated[Path, typer.Argument(help="Live config (YAML).")],
+    open_browser: Annotated[
+        bool, typer.Option("--open", help="Open it in the default browser after writing it.")
+    ] = False,
+    data_dir: DataDirOption = None,
+) -> None:
+    """(Re)build the local HTML dashboard: equity curve, positions, orders, fills."""
+    config = _live_config(config_file)
+    path = live_dashboard.write_dashboard(config, data_dir)
+    console.print(f"Wrote {path}")
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(path.resolve().as_uri())
 
 
 @live_app.command("kill")

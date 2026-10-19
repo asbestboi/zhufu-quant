@@ -11,6 +11,7 @@ from qr.live import journal
 from qr.live.config import LiveConfig
 from qr.live.cycle import (
     ALREADY_COMPLETED,
+    ALREADY_EXPIRED,
     COMPLETED,
     FAILED,
     NO_DECISION,
@@ -95,6 +96,21 @@ def test_rerunning_the_same_decision_is_idempotent(tmp_path: Path) -> None:
         assert position.quantity == positions_after_first[symbol].quantity
     did = journal.decision_id(config.strategy, as_of)
     assert len(journal.read_orders(did, data_directory=tmp_path)) == 2
+
+
+def test_an_expired_decision_never_sends_orders_however_it_is_resumed(tmp_path: Path) -> None:
+    symbols, as_of, closes = _seeded_two_symbol_store(tmp_path)
+    config = make_live_config(symbols, tmp_path)
+    broker = SimBroker()
+    broker.set_prices(closes)
+    run_cycle(config, broker, dry_run=True, as_of=as_of, data_dir=tmp_path)  # plan it
+    did = journal.decision_id(config.strategy, as_of)
+    journal.set_decision_status(did, journal.EXPIRED, data_directory=tmp_path)
+
+    result = run_cycle(config, broker, approve=True, as_of=as_of, data_dir=tmp_path)
+    assert result.status == ALREADY_EXPIRED
+    assert broker.account().positions == {}
+    assert journal.read_orders(did, data_directory=tmp_path).empty
 
 
 def test_resume_after_a_simulated_crash_between_submit_and_fill(tmp_path: Path) -> None:

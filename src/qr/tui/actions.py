@@ -123,6 +123,66 @@ def backtest_compare(run_ids: Sequence[str]) -> Invocation:
     return Invocation(("backtest", "compare", *run_ids), "backtest_compare", kwargs)
 
 
+def live_run(config_file: str, dry_run: bool = False, catch_up: bool = False) -> Invocation:
+    argv = ["live", "run", config_file]
+    if dry_run:
+        argv.append("--dry-run")
+    if catch_up:
+        argv.append("--catch-up")
+    kwargs = {
+        "config_file": Path(config_file),
+        "dry_run": dry_run,
+        "catch_up": catch_up,
+        "data_dir": None,
+    }
+    return Invocation(tuple(argv), "live_run", kwargs)
+
+
+def live_approve(config_file: str, yes: bool = False) -> Invocation:
+    argv = ["live", "approve", config_file]
+    if yes:
+        argv.append("--yes")
+    kwargs = {"config_file": Path(config_file), "yes": yes, "data_dir": None}
+    return Invocation(tuple(argv), "live_approve", kwargs)
+
+
+def live_status(config_file: str) -> Invocation:
+    kwargs = {"config_file": Path(config_file), "data_dir": None}
+    return Invocation(("live", "status", config_file), "live_status", kwargs)
+
+
+def live_report(
+    config_file: str, month: str | None = None, tracking: bool = False, out: str | None = None
+) -> Invocation:
+    argv = ["live", "report", config_file]
+    if month is not None:
+        argv += ["--month", month]
+    if tracking:
+        argv.append("--tracking")
+    if out is not None:
+        argv += ["--out", out]
+    kwargs = {
+        "config_file": Path(config_file),
+        "month": month,
+        "tracking": tracking,
+        "out": Path(out) if out is not None else None,
+        "data_dir": None,
+    }
+    return Invocation(tuple(argv), "live_report_cmd", kwargs)
+
+
+def live_dashboard(config_file: str, open_browser: bool = False) -> Invocation:
+    argv = ["live", "dashboard", config_file]
+    if open_browser:
+        argv.append("--open")
+    kwargs = {
+        "config_file": Path(config_file),
+        "open_browser": open_browser,
+        "data_dir": None,
+    }
+    return Invocation(tuple(argv), "live_dashboard_cmd", kwargs)
+
+
 # --------------------------------------------------------------------------- running
 
 

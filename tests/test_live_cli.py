@@ -10,6 +10,7 @@ import yaml
 from typer.testing import CliRunner
 
 import qr.live.cycle as cycle_module
+import qr.live.schedule as schedule_module
 import qr.live.sim_broker as sim_broker_module
 from qr import calendars
 from qr.cli import app
@@ -20,10 +21,12 @@ runner = CliRunner()
 
 
 def _freeze_now(monkeypatch: pytest.MonkeyPatch, as_of: date) -> None:
-    """Make both the cycle and the sim broker see ``as_of``'s close as "now".
+    """Make the cycle, the sim broker, and the scheduler see ``as_of``'s close as "now".
 
     The CLI always acts on the real current month-end; these tests run it against a
-    fixed historical fixture instead, so the clock the cycle reads has to be fixed too.
+    fixed historical fixture instead, so every module that reads its own clock has to be
+    fixed to the same instant, or the scheduler's missed-decision maintenance pass (which
+    reads real wall-clock time otherwise) would see a years-old gap and flag everything.
     """
     instant = datetime.combine(as_of, time(23, 59))
 
@@ -34,6 +37,7 @@ def _freeze_now(monkeypatch: pytest.MonkeyPatch, as_of: date) -> None:
 
     monkeypatch.setattr(cycle_module, "datetime", _Frozen)
     monkeypatch.setattr(sim_broker_module, "datetime", _Frozen)
+    monkeypatch.setattr(schedule_module, "datetime", _Frozen)
 
 
 def _seeded_config(tmp_path: Path) -> tuple[Path, date]:
@@ -161,6 +165,82 @@ def test_paper_ledger_broker_is_not_gated_and_status_reports_it(tmp_path: Path) 
     assert "paper_ledger" in status.output
     assert "paper" in status.output
     assert "Cash: $10,000.00" in status.output
+
+
+def test_run_with_no_input_leaves_the_plan_awaiting_qr_live_approve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path, as_of = _seeded_config(tmp_path)
+    _freeze_now(monkeypatch, as_of)
+    result = runner.invoke(app, ["live", "run", str(config_path), "--data-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "qr live approve" in result.output
+
+    status = runner.invoke(app, ["live", "status", str(config_path), "--data-dir", str(tmp_path)])
+    assert "No open positions" in status.output  # nothing was ever sent to the broker
+
+    approved = runner.invoke(
+        app, ["live", "approve", str(config_path), "--data-dir", str(tmp_path)], input="y\n"
+    )
+    assert approved.exit_code == 0, approved.output
+    assert "completed" in approved.output
+    assert (tmp_path / "sim_cli-test.json").exists()
+
+    again = runner.invoke(app, ["live", "approve", str(config_path), "--data-dir", str(tmp_path)])
+    assert again.exit_code == 0, again.output
+    assert "No plan is awaiting approval" in again.output
+
+
+def test_approve_with_yes_skips_the_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_path, as_of = _seeded_config(tmp_path)
+    _freeze_now(monkeypatch, as_of)
+    runner.invoke(app, ["live", "run", str(config_path), "--data-dir", str(tmp_path)])
+    approved = runner.invoke(
+        app, ["live", "approve", str(config_path), "--yes", "--data-dir", str(tmp_path)]
+    )
+    assert approved.exit_code == 0, approved.output
+    assert "completed" in approved.output
+
+
+def test_dashboard_command_writes_a_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_path, as_of = _seeded_config(tmp_path)
+    _freeze_now(monkeypatch, as_of)
+    runner.invoke(
+        app,
+        ["live", "run", str(config_path), "--data-dir", str(tmp_path)],
+        input="y\n",
+    )
+    result = runner.invoke(
+        app, ["live", "dashboard", str(config_path), "--data-dir", str(tmp_path)]
+    )
+    assert result.exit_code == 0, result.output
+    path = tmp_path / "dashboard_cli-test.html"
+    assert path.is_file()
+    assert "<html>" in path.read_text(encoding="utf-8")
+
+
+def test_report_tracking_writes_md_and_html(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path, as_of = _seeded_config(tmp_path)
+    _freeze_now(monkeypatch, as_of)
+    runner.invoke(
+        app,
+        ["live", "run", str(config_path), "--data-dir", str(tmp_path)],
+        input="y\n",
+    )
+    out = tmp_path / "reports" / f"{as_of:%Y-%m}"
+    result = runner.invoke(
+        app,
+        [
+            "live", "report", str(config_path), "--month", f"{as_of:%Y-%m}", "--tracking",
+            "--out", str(out), "--data-dir", str(tmp_path),
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    assert out.with_suffix(".md").is_file()
+    assert out.with_suffix(".html").is_file()
+    assert "Reliability" in out.with_suffix(".md").read_text(encoding="utf-8")
 
 
 def test_kill_and_unkill(tmp_path: Path) -> None:

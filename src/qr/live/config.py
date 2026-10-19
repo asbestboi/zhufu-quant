@@ -56,6 +56,17 @@ class PaperLedgerConfig(_Model):
     limit_buffer: float = Field(default=0.003, ge=0, lt=1)
 
 
+class BenchmarkConfig(_Model):
+    """A strategy run only as a shadow, never traded, for the monthly tracking report.
+
+    Any registered ``qr`` strategy works here (e.g. a fixed-weight baseline) -- this
+    config never knows it is being used as a benchmark rather than a candidate.
+    """
+
+    strategy: str = Field(min_length=1)
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
 class LiveConfig(_Model):
     """Everything that defines one paper-trading strategy's monthly cycle."""
 
@@ -67,6 +78,9 @@ class LiveConfig(_Model):
     broker: BrokerName = "sim"
     ibkr: IBKRConfig = Field(default_factory=IBKRConfig)
     paper_ledger: PaperLedgerConfig = Field(default_factory=PaperLedgerConfig)
+    # A shadow-only comparison for the monthly tracking report (qr.live.report) and the
+    # dashboard -- never traded, never sized, never checked for safety.
+    benchmark: BenchmarkConfig | None = None
     initial_cash: float = Field(default=100_000.0, gt=0)  # sim broker's starting cash only
     # The account's *managed* capital, in its base currency: qr.live plans, checks, and
     # reports against this number, never the account's total equity. A paper account is

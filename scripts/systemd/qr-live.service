@@ -1,0 +1,9 @@
+[Unit]
+Description=qr live run -- plan/approve-gate/resolve this strategy's paper-trading decision
+# Runs after the morning data refresh, if qr-ingest.timer is also installed.
+After=qr-ingest.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/zhufu-quant
+ExecStart=/usr/bin/env uv run qr live run /path/to/live.yaml --catch-up

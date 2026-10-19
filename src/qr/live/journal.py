@@ -97,6 +97,7 @@ PLANNED = "planned"
 SUBMITTED = "submitted"
 COMPLETED = "completed"
 FAILED = "failed"
+EXPIRED = "expired"  # a plan presented for approval and never approved nor rejected
 
 
 def decision_id(strategy: str, decision_date: date) -> str:
@@ -164,6 +165,26 @@ def find_decision(
         frame = con.execute(
             "SELECT * FROM live_decisions WHERE decision_id = ?",
             [decision_id(strategy, decision_date)],
+        ).df()
+    return None if frame.empty else _row_to_decision(frame.iloc[0])
+
+
+def find_latest_by_status(
+    strategy: str, status: str, data_directory: Path | str | None = None
+) -> DecisionRecord | None:
+    """The most recent decision of ``strategy`` in ``status``, if any.
+
+    Used by ``qr live approve`` to find "the" plan awaiting approval without the caller
+    having to know its decision date first.
+    """
+    path = journal_path(data_directory)
+    if not path.exists():
+        return None
+    with storage.connect(path, read_only=True) as con:
+        frame = con.execute(
+            "SELECT * FROM live_decisions WHERE strategy = ? AND status = ? "
+            "ORDER BY decision_date DESC LIMIT 1",
+            [strategy, status],
         ).df()
     return None if frame.empty else _row_to_decision(frame.iloc[0])
 

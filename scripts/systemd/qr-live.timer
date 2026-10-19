@@ -1,0 +1,9 @@
+[Timer]
+# Weekday mornings, after the US close has settled and the overnight qr-ingest run has
+# refreshed the data (if qr-ingest.timer is installed too). Needs systemd >= 239 for the
+# trailing timezone name; drop it and use UTC directly on an older systemd.
+OnCalendar=Mon..Fri 08:00 Europe/Prague
+Persistent=true
+
+[Install]
+WantedBy=timers.target

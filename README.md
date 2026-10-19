@@ -907,8 +907,12 @@ cash_buffer: 0.01
 ```
 qr live run CONFIG.yaml --dry-run    # plan + safety checks, sends nothing
 qr live run CONFIG.yaml              # plans, prints, asks to confirm, then sends
+qr live run CONFIG.yaml --catch-up   # also act on a recent missed month-end (see below)
+qr live approve CONFIG.yaml          # approve a plan a scheduled run left waiting
 qr live status CONFIG.yaml           # kill switch, broker account and positions, latest decision
 qr live report CONFIG.yaml           # what was decided, sent, and filled this month
+qr live report CONFIG.yaml --tracking --out PATH   # the fuller monthly tracking report (md + html)
+qr live dashboard CONFIG.yaml --open # a local HTML dashboard: equity curve, positions, orders, fills
 qr live kill / unkill                # refuse to send orders until unkill
 ```
 
@@ -983,6 +987,92 @@ own login, and only ever hands `qr` a host, a port, and a client id.
    `127.0.0.1`/`4002`/`1`; override under an `ibkr:` block if you run more than one
    Gateway or client). Then `qr live status CONFIG.yaml` should show the paper account
    and its positions (empty is fine on a fresh account).
+
+### Scheduling a monthly decision
+
+`qr live run CONFIG.yaml` decides for itself whether there's anything to do -- it's a
+no-op on most days -- so the same command can simply be scheduled every weekday morning.
+A maintenance pass runs first (`qr.live.schedule`), on every `run` and `approve` alike:
+it expires a plan that has sat unapproved for more than 3 trading days (recorded as a
+missed decision, never later sendable), flags a decision still unresolved 3 trading days
+after close for visibility (left alone otherwise -- the order lifecycle's own
+window-end cancellation resolves it), and flags a month-end nobody ever ran at all after
+the same 3 trading days. A daily run also resumes polling/resolving any of this
+strategy's still-`submitted` decisions from a previous day, independent of today's own
+decision -- so a `paper_ledger` order left open because a bar hadn't downloaded yet gets
+settled on the next run, not just the one that opened it.
+
+**Catch-up:** if a run is missed (the machine was off, the timer didn't fire), the next
+`qr live run --catch-up` acts on the most recent month-end it hasn't handled yet,
+provided it's within the 3-trading-day window above, and records the delay in the
+journal. Past that window the maintenance pass expires or flags it as missed instead.
+
+**Manual approval:** with a terminal attached, `qr live run` prints the plan and asks you
+to confirm before sending. Run from a timer -- no terminal, nothing to confirm in -- it
+prints the plan and leaves the decision `planned`, waiting for you to run
+`qr live approve CONFIG.yaml` (pass `--yes` to skip its own confirmation prompt, e.g.
+from another script).
+
+**Alerts:** every missed/expired/still-unresolved event from the maintenance pass is
+written to the journal and printed to the console; if `notify-send` is on the `PATH` (any
+desktop environment with a notification daemon), a desktop notification is sent too --
+best-effort, and silently skipped if it isn't available (e.g. no graphical session).
+
+#### Linux: a systemd user timer
+
+Unit files are in `scripts/systemd/`. Edit the paths inside, then install into
+`~/.config/systemd/user/`:
+
+```
+cp scripts/systemd/qr-live.service scripts/systemd/qr-live.timer ~/.config/systemd/user/
+# edit WorkingDirectory and the live.yaml path in qr-live.service
+systemctl --user daemon-reload
+systemctl --user enable --now qr-live.timer
+```
+
+```ini
+# qr-live.service
+[Unit]
+Description=qr live run -- plan/approve-gate/resolve this strategy's paper-trading decision
+After=qr-ingest.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/zhufu-quant
+ExecStart=/usr/bin/env uv run qr live run /path/to/live.yaml --catch-up
+
+# qr-live.timer
+[Timer]
+OnCalendar=Mon..Fri 08:00 Europe/Prague
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+
+`Persistent=true` means a run that was missed because the machine was off fires as soon
+as it's back on -- combined with `--catch-up` and the 3-trading-day window above, this is
+the catch-up behaviour. `notify-send` needs a graphical session's `DBUS_SESSION_BUS_ADDRESS`
+to actually pop a notification; a `systemctl --user` timer run during a normal desktop
+login inherits this automatically, so no extra setup is needed on Arch. Check the unit's
+own log with `journalctl --user -u qr-live.service`.
+
+#### Windows
+
+No scheduled-task script ships for `qr live` yet (unlike ingestion's
+`scripts/windows/register_task.ps1`) -- run `qr live run CONFIG.yaml --catch-up` from a
+Task Scheduler action on the same weekday-morning trigger as the ingest task, after it,
+same as the systemd `After=` above.
+
+### The dashboard
+
+`qr live dashboard CONFIG.yaml` writes a self-contained local HTML file
+(`dashboard_<name>.html` next to the journal; `--open` opens it in your browser) with the
+equity curve (the paper ledger against a shadow backtest of the strategy itself and, if
+`benchmark:` is set in the config, a shadow benchmark too), current positions and
+weights, cash, every order and fill, and a month-by-month table. No network calls and no
+external assets, so it opens straight from disk, offline, any time later. `qr live run`
+and `qr live approve` both regenerate it automatically after every call (skipped on
+`--dry-run`), so it's never more than one run behind.
 
 ## How it works
 

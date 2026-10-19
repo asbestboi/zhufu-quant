@@ -132,6 +132,7 @@ class Menu:
         sections: dict[str, Callable[[], None]] = {
             "Data": self.data_menu,
             "Backtests": self.backtest_menu,
+            "Paper trading": self.paper_trading_menu,
             "Settings / info": self.settings_menu,
         }
         self.path = ["Main menu"]
@@ -188,6 +189,18 @@ class Menu:
                 "List recent runs": self.backtest_list,
                 "Compare runs": self.backtest_compare,
                 "Open a report": self.open_report,
+            },
+        )
+
+    def paper_trading_menu(self) -> None:
+        self.submenu(
+            "Paper trading",
+            {
+                "Run today's decision": self.live_run,
+                "Approve a waiting plan": self.live_approve,
+                "Status": self.live_status,
+                "Monthly report": self.live_report,
+                "Dashboard": self.live_dashboard,
             },
         )
 
@@ -398,6 +411,64 @@ class Menu:
         actions.open_report(labels[picked], self.console)
         self.done()
 
+    # ------------------------------------------------------------------ paper trading
+
+    def pick_live_config(self) -> str | None:
+        files = discover_live_configs()
+        if not files:
+            self.console.print("No live configs found in configs/live/ or configs/private/.")
+            self.done()
+            return None
+        labels = {describe_live_config(path): path for path in files}
+        picked = self.prompter.select("Which live config?", [*labels, BACK])
+        if picked == BACK:
+            return None
+        return labels[picked].as_posix()
+
+    def live_run(self) -> None:
+        config_file = self.pick_live_config()
+        if config_file is None:
+            return
+        dry_run = self.prompter.confirm("Dry run (preview only, send nothing)?", default=True)
+        catch_up = not dry_run and self.prompter.confirm(
+            "Also catch up a recent missed month-end?", default=False
+        )
+        self.execute(actions.live_run(config_file, dry_run, catch_up))
+
+    def live_approve(self) -> None:
+        config_file = self.pick_live_config()
+        if config_file is None:
+            return
+        self.execute(actions.live_approve(config_file))
+
+    def live_status(self) -> None:
+        config_file = self.pick_live_config()
+        if config_file is None:
+            return
+        self.execute(actions.live_status(config_file))
+
+    def live_report(self) -> None:
+        config_file = self.pick_live_config()
+        if config_file is None:
+            return
+        month = self.prompter.text("Which month? (YYYY-MM, blank for this month)").strip()
+        tracking = self.prompter.confirm(
+            "Full tracking report (reliability, consistency, shadow performance)?", default=False
+        )
+        out = ""
+        if tracking:
+            out = self.prompter.text(
+                "Write to a file instead of printing? (blank to print)"
+            ).strip()
+        self.execute(actions.live_report(config_file, month or None, tracking, out or None))
+
+    def live_dashboard(self) -> None:
+        config_file = self.pick_live_config()
+        if config_file is None:
+            return
+        open_browser = self.prompter.confirm("Open it in the browser?", default=True)
+        self.execute(actions.live_dashboard(config_file, open_browser))
+
     # ------------------------------------------------------------------ settings
 
     def config_summary(self) -> None:
@@ -433,6 +504,29 @@ def describe_config(path: Path) -> str:
     except ConfigError:
         return f"{path.as_posix()}  (invalid config)"
     return f"{path.as_posix()}  ({config.strategy}, {config.engine})"
+
+
+LIVE_CONFIG_FOLDERS = (Path("configs/live"), Path("configs/private"))
+
+
+def discover_live_configs(folders: tuple[Path, ...] = LIVE_CONFIG_FOLDERS) -> list[Path]:
+    """Live-trading configs in ``configs/live/`` and, if present, ``configs/private/``."""
+    found: list[Path] = []
+    for folder in folders:
+        if folder.is_dir():
+            found += sorted(p for p in folder.rglob("*") if p.suffix in (".yaml", ".yml"))
+    return found
+
+
+def describe_live_config(path: Path) -> str:
+    """A live config's path with its strategy and broker, for a menu entry."""
+    from qr.live.config import load_live_config
+
+    try:
+        config = load_live_config(path)
+    except ConfigError:
+        return f"{path.as_posix()}  (invalid config)"
+    return f"{path.as_posix()}  ({config.strategy}, {config.broker})"
 
 
 def describe_run(row: Mapping[Hashable, Any]) -> str:

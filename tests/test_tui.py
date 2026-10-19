@@ -79,13 +79,18 @@ class Scripted:
 
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A project folder with a universe config and two backtest configs, as the cwd."""
+    """A project folder with a universe config, two backtest configs, and a live config."""
     (tmp_path / "config").mkdir()
     (tmp_path / "config" / "universe.yaml").write_text(UNIVERSE, encoding="utf-8")
     repo = Path(__file__).parent.parent / "configs" / "backtests"
     for folder, name in (("backtests", "sma_spy_event.yaml"), ("private", "pairs_ko_pep.yaml")):
         (tmp_path / "configs" / folder).mkdir(parents=True)
         (tmp_path / "configs" / folder / name).write_text((repo / name).read_text("utf-8"), "utf-8")
+    live_repo = Path(__file__).parent.parent / "configs" / "live" / "xs_momentum_demo.yaml"
+    (tmp_path / "configs" / "live").mkdir(parents=True)
+    (tmp_path / "configs" / "live" / "xs_momentum_demo.yaml").write_text(
+        live_repo.read_text("utf-8"), "utf-8"
+    )
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("QR_CONFIG", raising=False)
     monkeypatch.delenv("QR_DATA_DIR", raising=False)
@@ -106,6 +111,11 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, Any]]]:
         "backtest_run",
         "backtest_list",
         "backtest_compare",
+        "live_run",
+        "live_approve",
+        "live_status",
+        "live_report_cmd",
+        "live_dashboard_cmd",
     ):
         monkeypatch.setattr(cli, name, lambda _n=name, **kw: seen.append((_n, kw)))
     return seen
@@ -124,7 +134,11 @@ def cli_kwargs(argv: list[str]) -> tuple[str, dict[str, Any]]:
     Each command's registered function is swapped for a recorder with the same signature,
     so Typer parses the arguments exactly as it would for a user.
     """
-    infos = [*cli.app.registered_commands, *cli.backtest_app.registered_commands]
+    infos = [
+        *cli.app.registered_commands,
+        *cli.backtest_app.registered_commands,
+        *cli.live_app.registered_commands,
+    ]
     originals = [info.callback for info in infos]
     received: dict[str, Any] = {}
 
@@ -295,6 +309,60 @@ ACTIONS: list[tuple[list[Any], str, str]] = [
         "backtest_list",
     ),
     (["Backtests", "Compare runs", ["R2", "R1"]], "qr backtest compare R2 R1", "backtest_compare"),
+    (
+        ["Paper trading", "Run today's decision", "configs/live/xs_momentum_demo.yaml", True],
+        "qr live run configs/live/xs_momentum_demo.yaml --dry-run",
+        "live_run",
+    ),
+    (
+        [
+            "Paper trading",
+            "Run today's decision",
+            "configs/live/xs_momentum_demo.yaml",
+            False,
+            True,
+        ],
+        "qr live run configs/live/xs_momentum_demo.yaml --catch-up",
+        "live_run",
+    ),
+    (
+        ["Paper trading", "Approve a waiting plan", "configs/live/xs_momentum_demo.yaml"],
+        "qr live approve configs/live/xs_momentum_demo.yaml",
+        "live_approve",
+    ),
+    (
+        ["Paper trading", "Status", "configs/live/xs_momentum_demo.yaml"],
+        "qr live status configs/live/xs_momentum_demo.yaml",
+        "live_status",
+    ),
+    (
+        [
+            "Paper trading",
+            "Monthly report",
+            "configs/live/xs_momentum_demo.yaml",
+            "2023-01",
+            False,
+        ],
+        "qr live report configs/live/xs_momentum_demo.yaml --month 2023-01",
+        "live_report_cmd",
+    ),
+    (
+        [
+            "Paper trading",
+            "Monthly report",
+            "configs/live/xs_momentum_demo.yaml",
+            "",
+            True,
+            "out/report",
+        ],
+        "qr live report configs/live/xs_momentum_demo.yaml --tracking --out out/report",
+        "live_report_cmd",
+    ),
+    (
+        ["Paper trading", "Dashboard", "configs/live/xs_momentum_demo.yaml", True],
+        "qr live dashboard configs/live/xs_momentum_demo.yaml --open",
+        "live_dashboard_cmd",
+    ),
 ]
 
 
@@ -344,6 +412,13 @@ def test_every_action_runs_its_command_and_prints_it(
         actions.backtest_list(),
         actions.backtest_list("xs_momentum"),
         actions.backtest_compare(["R1", "R2"]),
+        actions.live_run("configs/live/xs_momentum_demo.yaml", True),
+        actions.live_run("configs/live/xs_momentum_demo.yaml", False, True),
+        actions.live_approve("configs/live/xs_momentum_demo.yaml"),
+        actions.live_status("configs/live/xs_momentum_demo.yaml"),
+        actions.live_report("configs/live/xs_momentum_demo.yaml", "2023-01"),
+        actions.live_report("configs/live/xs_momentum_demo.yaml", None, True, "out/report"),
+        actions.live_dashboard("configs/live/xs_momentum_demo.yaml", True),
     ],
     ids=lambda inv: inv.command_line,
 )
