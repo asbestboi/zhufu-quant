@@ -376,7 +376,12 @@ def record_positions(
     as_of: datetime | None = None,
     data_directory: Path | str | None = None,
 ) -> None:
-    """Snapshot every held position after a run, for reconciliation and reporting."""
+    """Snapshot every held position after a run, for reconciliation and reporting.
+
+    A no-op for a flat account: DuckDB's ``executemany`` refuses an empty parameter list.
+    """
+    if not positions:
+        return
     as_of = as_of or storage.utcnow()
     init_schema(data_directory)
     with storage.connect(journal_path(data_directory)) as con:

@@ -8,11 +8,13 @@ from pathlib import Path
 
 from qr import calendars
 from qr.live import journal
+from qr.live.config import LiveConfig
 from qr.live.cycle import (
     ALREADY_COMPLETED,
     COMPLETED,
     FAILED,
     NO_DECISION,
+    SUBMITTED,
     is_month_end,
     run_cycle,
 )
@@ -127,6 +129,66 @@ def test_resume_after_a_simulated_crash_between_submit_and_fill(tmp_path: Path) 
 
     account = broker.account()
     assert set(account.positions) == set(symbols)
+
+
+def _slow_poll_config(symbols: list[str], tmp_path: Path, **overrides: object) -> LiveConfig:
+    """A config whose poll loop times out almost immediately, for a fast unit test."""
+    return make_live_config(
+        symbols, tmp_path, order_poll_interval_seconds=0.01, order_poll_timeout_seconds=0.02,
+        **overrides,
+    )  # fmt: skip
+
+
+def test_orders_still_open_after_the_poll_timeout_leave_the_decision_submitted(
+    tmp_path: Path,
+) -> None:
+    symbols, as_of, closes = _seeded_two_symbol_store(tmp_path)
+    config = _slow_poll_config(symbols, tmp_path)
+    broker = SimBroker(fill_behavior="never")
+    broker.set_prices(closes)
+
+    result = run_cycle(config, broker, approve=True, as_of=as_of, data_dir=tmp_path)
+    assert result.status == SUBMITTED
+    assert broker.account().positions == {}
+    assert len(broker.open_orders()) == 2
+
+
+def test_dry_run_never_disturbs_an_already_submitted_decision(tmp_path: Path) -> None:
+    symbols, as_of, closes = _seeded_two_symbol_store(tmp_path)
+    config = _slow_poll_config(symbols, tmp_path)
+    broker = SimBroker(fill_behavior="never")
+    broker.set_prices(closes)
+    run_cycle(config, broker, approve=True, as_of=as_of, data_dir=tmp_path)
+    did = journal.decision_id(config.strategy, as_of)
+    orders_before = journal.read_orders(did, data_directory=tmp_path)
+
+    result = run_cycle(config, broker, dry_run=True, as_of=as_of, data_dir=tmp_path)
+    assert result.status == SUBMITTED  # not AWAITING_APPROVAL: this decision was already sent
+    orders_after = journal.read_orders(did, data_directory=tmp_path)
+    assert len(orders_after) == len(orders_before) == 2
+    assert len(broker.open_orders()) == 2  # dry run touched neither order
+
+
+def test_resuming_a_submitted_decision_completes_once_orders_resolve(tmp_path: Path) -> None:
+    symbols, as_of, closes = _seeded_two_symbol_store(tmp_path)
+    config = _slow_poll_config(symbols, tmp_path)
+    broker = SimBroker(fill_behavior="never")
+    broker.set_prices(closes)
+    run_cycle(config, broker, approve=True, as_of=as_of, data_dir=tmp_path)
+    did = journal.decision_id(config.strategy, as_of)
+    assert len(journal.read_orders(did, data_directory=tmp_path)) == 2
+
+    # Simulate the broker now reporting both orders filled (whatever happened on IB's
+    # side between calls): resuming must pick these up, not resubmit new orders.
+    for order in broker._orders.values():
+        order.status = "filled"
+        order.filled_quantity = order.quantity
+
+    result = run_cycle(config, broker, approve=True, as_of=as_of, data_dir=tmp_path)
+    assert result.status == COMPLETED
+    orders = journal.read_orders(did, data_directory=tmp_path)
+    assert len(orders) == 2  # never resubmitted
+    assert set(orders["status"]) == {"filled"}
 
 
 def test_kill_switch_blocks_submission_and_journals_an_alert(tmp_path: Path) -> None:

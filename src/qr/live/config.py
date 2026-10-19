@@ -60,6 +60,15 @@ class LiveConfig(_Model):
     max_gross_leverage: float = Field(default=1.0, gt=0)
     max_price_age_days: float = Field(default=4.0, gt=0)
     max_price_jump: float = Field(default=0.20, gt=0)
+    # How long an order is allowed to work before it's cancelled outright, never chased
+    # (qr.live.cycle's order-lifecycle poller). Anchored to the decision's first order
+    # submission, so it survives a restart rather than restarting on every resume.
+    order_window_minutes: float = Field(default=30.0, gt=0)
+    order_poll_interval_seconds: float = Field(default=5.0, gt=0)
+    # How long a single qr.live.cycle.run_cycle call will actively poll before returning
+    # control (so a CLI invocation never blocks for the full order_window_minutes); a
+    # later call resumes polling the same orders, never resubmitting them.
+    order_poll_timeout_seconds: float = Field(default=60.0, gt=0)
     # Where `KILL` is looked for (qr.live.safety), and where this config's own relative
     # paths (none yet) would resolve. Defaults to the current directory.
     working_dir: Path = Path()

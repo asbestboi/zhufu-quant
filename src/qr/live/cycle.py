@@ -13,16 +13,28 @@ The target weights themselves are computed once, at the moment the decision is c
 and then frozen in the journal: approving or resuming a decision never recomputes them,
 so what gets approved is exactly what gets (eventually) submitted, even if the data store
 has moved on by the time that happens.
+
+Submission itself (:func:`_submit_and_track`) is the same idempotent-by-the-journal
+story one level down: a symbol already journaled for this decision, whatever its
+status, is never submitted again. An order still open when a call's poll budget runs
+out is simply left open -- the next call resumes polling it, never resubmitting it --
+until the order window itself elapses, at which point it is cancelled outright and the
+shortfall journaled as an alert. Never chased with a replacement order.
 """
 
 from __future__ import annotations
 
+import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
+
 from qr import calendars
+from qr.backtest.events import Order
 from qr.live import journal, safety
 from qr.live.broker import Broker, PriceQuote
 from qr.live.config import LiveConfig
@@ -108,31 +120,128 @@ def _plan_for(
     return plan, quotes, checked_at
 
 
-def _submit(did: str, plan: Plan, broker: Broker, *, data_dir: Path | str | None) -> None:
+TERMINAL_ORDER_STATUSES = ["filled", "cancelled", "rejected", "expired"]
+
+
+def _record_terminal(
+    did: str, order_id: str, status: Order, *, data_dir: Path | str | None
+) -> None:
+    """Journal an order's final state, and the fill it produced, if any.
+
+    Called exactly once per order, right when it first reaches a terminal status, so
+    this is the only place a fill is ever recorded -- safe even for a partial fill that
+    a later step cancels, since cancelling never changes ``filled_quantity`` again.
+    """
+    journal.record_order(
+        order_id, did, status.symbol, status.side, status.quantity,
+        status.limit_price or 0.0, status.status, data_directory=data_dir,
+    )  # fmt: skip
+    if status.filled_quantity:
+        journal.record_fill(
+            order_id, did, status.symbol, status.side, status.filled_quantity,
+            status.limit_price or 0.0, 0.0, data_directory=data_dir,
+        )  # fmt: skip
+    if status.status == "filled" and abs(status.filled_quantity - status.quantity) > (
+        RECONCILE_TOLERANCE_SHARES
+    ):
+        journal.record_alert(
+            f"{status.symbol}: planned {status.quantity:g} shares, broker filled "
+            f"{status.filled_quantity:g}",
+            severity="warning",
+            did=did,
+            data_directory=data_dir,
+        )
+
+
+def _submit_and_track(
+    did: str,
+    plan: Plan,
+    broker: Broker,
+    *,
+    order_window_minutes: float,
+    poll_interval_seconds: float,
+    poll_timeout_seconds: float,
+    data_dir: Path | str | None,
+    now: Callable[[], datetime] = datetime.now,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Submit this plan's still-missing orders, then poll until each resolves.
+
+    Resumable and idempotent by construction: a symbol already journaled for ``did`` --
+    whatever its status -- is never submitted again, so a crash (or simply a poll
+    timeout) between submitting and resolving is recovered from by just calling this
+    again; it picks up tracking the same broker order ids from the journal rather than
+    sending new ones. Orders are always day limit orders (never market): that's what
+    lets a real broker price them, and it's a no-op for :class:`SimBroker`.
+
+    Polling stops, and this returns with orders still open, if ``poll_timeout_seconds``
+    elapses before ``order_window_minutes`` does -- the caller sees this decision is
+    still ``submitted`` and nothing more happens until it is resumed. Only once the
+    order window itself has elapsed are the remaining open orders cancelled -- never
+    chased with a replacement -- and the shortfall recorded as an alert.
+    """
+    existing = journal.read_orders(did, data_directory=data_dir)
+    already_submitted = set(existing["symbol"]) if not existing.empty else set()
+    open_order_ids: dict[str, str] = {}  # broker order id -> symbol
+    if not existing.empty:
+        for _, row in existing.iterrows():
+            if row["status"] not in TERMINAL_ORDER_STATUSES:
+                open_order_ids[row["order_id"]] = row["symbol"]
+
     for order in plan.orders:
-        result = broker.place_order(order.symbol, order.side, order.quantity)
+        if order.symbol in already_submitted:
+            continue
+        result = broker.place_order(order.symbol, order.side, order.quantity, type="limit")
         journal.record_order(
             result.id, did, order.symbol, order.side, order.quantity, order.price,
-            result.status, data_directory=data_dir,
+            result.status, submitted_at=now(), data_directory=data_dir,
         )  # fmt: skip
-        if result.filled_quantity:
-            journal.record_fill(
-                result.id, did, order.symbol, order.side, result.filled_quantity,
-                order.price, 0.0, data_directory=data_dir,
-            )  # fmt: skip
-        if result.status == "filled" and abs(result.filled_quantity - order.quantity) > (
-            RECONCILE_TOLERANCE_SHARES
-        ):
+        if result.status in TERMINAL_ORDER_STATUSES:
+            _record_terminal(did, result.id, result, data_dir=data_dir)
+        else:
+            open_order_ids[result.id] = order.symbol
+
+    if not open_order_ids:
+        return
+
+    all_orders = journal.read_orders(did, data_directory=data_dir)
+    window_end = pd.Timestamp(all_orders["submitted_at"].min()).to_pydatetime() + timedelta(
+        minutes=order_window_minutes
+    )
+    poll_deadline = now() + timedelta(seconds=poll_timeout_seconds)
+
+    while open_order_ids and now() < window_end and now() < poll_deadline:
+        sleep(poll_interval_seconds)
+        for order_id in list(open_order_ids):
+            status = broker.order_status(order_id)
+            if status.status in TERMINAL_ORDER_STATUSES:
+                _record_terminal(did, order_id, status, data_dir=data_dir)
+                del open_order_ids[order_id]
+            elif status.status == "partially_filled":
+                # Not terminal yet (a partial fill can still complete) -- journal the
+                # running status so a crash mid-fill is visible on resume, but never
+                # record a fill here: that happens exactly once, when it does resolve.
+                journal.record_order(
+                    order_id, did, status.symbol, status.side, status.quantity,
+                    status.limit_price or 0.0, status.status, data_directory=data_dir,
+                )  # fmt: skip
+
+    if not open_order_ids or now() < window_end:
+        return  # either resolved, or just this call's poll budget ran out -- resume later
+
+    for order_id, symbol in open_order_ids.items():
+        broker.cancel_order(order_id)
+        status = broker.order_status(order_id)
+        _record_terminal(did, order_id, status, data_dir=data_dir)
+        unfilled = status.quantity - status.filled_quantity
+        if unfilled > RECONCILE_TOLERANCE_SHARES:
             journal.record_alert(
-                f"{order.symbol}: planned {order.quantity:g} shares, broker filled "
-                f"{result.filled_quantity:g}",
+                f"{symbol}: {unfilled:g} of {status.quantity:g} shares unfilled at the "
+                "order window's end; cancelled, not chased",
                 severity="warning",
                 did=did,
                 data_directory=data_dir,
             )
-
-
-TERMINAL_ORDER_STATUSES = ["filled", "cancelled", "rejected", "expired"]
 
 
 def _is_resolved(did: str, nothing_left_to_plan: bool, data_dir: Path | str | None) -> bool:
@@ -220,7 +329,14 @@ def run_cycle(
             max_price_jump=config.max_price_jump,
         )
 
-        if decision.status == journal.PLANNED and (dry_run or not approve):
+        if dry_run:
+            # Never touches the broker, whatever this decision's status -- including a
+            # resumed one still being tracked, which must not be nudged by a dry run.
+            journal.finish_run(run_id, "ok", message="dry run", data_directory=data_dir)
+            status = AWAITING_APPROVAL if decision.status == journal.PLANNED else SUBMITTED
+            return CycleResult(run_id, status, decision.decision_id, plan)
+
+        if decision.status == journal.PLANNED and not approve:
             journal.finish_run(run_id, "ok", message="awaiting approval", data_directory=data_dir)
             return CycleResult(run_id, AWAITING_APPROVAL, decision.decision_id, plan)
 
@@ -228,7 +344,13 @@ def run_cycle(
             journal.set_decision_status(
                 decision.decision_id, journal.SUBMITTED, data_directory=data_dir
             )
-        _submit(decision.decision_id, plan, broker, data_dir=data_dir)
+        _submit_and_track(
+            decision.decision_id, plan, broker,
+            order_window_minutes=config.order_window_minutes,
+            poll_interval_seconds=config.order_poll_interval_seconds,
+            poll_timeout_seconds=config.order_poll_timeout_seconds,
+            data_dir=data_dir,
+        )  # fmt: skip
 
         if _is_resolved(decision.decision_id, not plan.orders, data_dir):
             journal.set_decision_status(

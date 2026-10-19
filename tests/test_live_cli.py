@@ -108,6 +108,34 @@ def test_run_approve_then_status_and_report(
     assert "buy_and_hold" in report.output
 
 
+def test_run_refuses_a_real_send_against_ibkr_but_allows_dry_run(tmp_path: Path) -> None:
+    config_path, _ = _seeded_config(tmp_path)
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "cli-test",
+                "strategy": "buy_and_hold",
+                "universe": ["AAA", "BBB"],
+                "broker": "ibkr",
+                "cash_buffer": 0.0,
+                "min_trade_weight": 0.0,
+                "working_dir": str(tmp_path),
+            }
+        )
+    )
+    # Refused before ever trying to connect to a (non-existent, in this test) Gateway --
+    # this is Part 2b's own interim gate, not an IB connection failure.
+    refused = runner.invoke(app, ["live", "run", str(config_path), "--data-dir", str(tmp_path)])
+    assert refused.exit_code != 0
+    assert "--dry-run" in refused.output
+
+    dry_run = runner.invoke(
+        app, ["live", "run", str(config_path), "--dry-run", "--data-dir", str(tmp_path)]
+    )
+    assert dry_run.exit_code != 0  # no IB Gateway running in this test
+    assert "--dry-run" not in dry_run.output  # got past the gate; failed trying to connect
+
+
 def test_kill_and_unkill(tmp_path: Path) -> None:
     killed = runner.invoke(app, ["live", "kill", "--data-dir", str(tmp_path)])
     assert killed.exit_code == 0

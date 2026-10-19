@@ -1108,10 +1108,15 @@ def live_run(
     unattended mode is Part 4.
     """
     config = _live_config(config_file)
+    if config.broker != "sim" and not dry_run:
+        raise _fail(
+            "`live run` only sends real orders through the sim broker for now (Part 2b's "
+            "order-lifecycle tracking for other brokers isn't merged yet); pass --dry-run "
+            f"to preview a plan and safety checks against broker: {config.broker}"
+        )
     broker = _live_broker(config, data_dir)
-    if not isinstance(broker, SimBroker):
-        raise _fail("`live run` only supports the sim broker for now; use `live status` for ibkr")
-    broker.set_prices(_latest_prices(config.universe, data_dir))
+    if isinstance(broker, SimBroker):
+        broker.set_prices(_latest_prices(config.universe, data_dir))
     planned = run_cycle(config, broker, dry_run=True, catch_up=catch_up, data_dir=data_dir)
     if planned.status == "no_decision":
         console.print(planned.message)
@@ -1133,7 +1138,8 @@ def live_run(
         console.print("Not sending; run again with --dry-run to just inspect the plan.")
         return
     result = run_cycle(config, broker, approve=True, catch_up=catch_up, data_dir=data_dir)
-    broker.save(_sim_account_path(config, data_dir))
+    if isinstance(broker, SimBroker):
+        broker.save(_sim_account_path(config, data_dir))
     console.print(f"Result: {result.status}  ({result.message})")
 
 

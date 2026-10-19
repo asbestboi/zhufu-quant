@@ -919,6 +919,17 @@ the account id (Interactive Brokers always starts a paper account's id with `DU`
 the port connected on (4002/7497, never the live 4001/7496) both have to check out, or
 every order is refused.
 
+Orders are always day limit orders, submitted once per symbol per decision and then
+polled for a fill -- never chased with a replacement. `order_window_minutes` (default
+30) is how long an order is allowed to work, anchored to its first submission so it
+survives a restart; once it elapses, any order still open is cancelled outright and the
+shortfall (partial or total) is journaled as an alert. `order_poll_timeout_seconds`
+(default 60) bounds how long one `qr live run` call will actively poll before returning
+control -- a later call (manual, or Part 4's scheduler) resumes polling the same orders,
+never resubmitting them, until the window itself ends. Until Part 2b's order-lifecycle
+tracking is merged, `qr live run` refuses to send real orders through `broker: ibkr`
+(pass `--dry-run` to preview a plan and safety checks against it in the meantime).
+
 ### IB Gateway setup (Arch Linux)
 
 `broker: ibkr` needs a running IB Gateway, and `ib_async` (`uv sync --extra live`).
