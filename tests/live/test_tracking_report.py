@@ -78,6 +78,34 @@ def test_consistency_check_flags_a_ledger_that_diverges_from_the_shadow(tmp_path
     assert result.mismatches  # at least one symbol disagrees
 
 
+def test_consistency_check_lets_the_shadows_own_rebalance_settle(tmp_path: Path) -> None:
+    """Regression: a shadow window ending exactly at the decision date never gives that
+    decision's own next-session-executed rebalance order a chance to fill, so the very
+    first month's consistency check always flagged a real (filled) ledger as a false
+    mismatch. `report._settle_end` extends the window past the decision so the shadow's
+    own order settles before positions are compared (build_tracking_report uses it)."""
+    start, end = date(2022, 11, 1), date(2023, 1, 15)
+    bars = {s: real_session_bars(start, end, seed=i) for i, s in enumerate(SYMBOLS)}
+    seed_store(tmp_path, bars)
+    sessions = sorted(bars["AAA"]["date"].dt.date)
+    decision_date = sessions[-6]  # a handful of real sessions still follow it
+
+    config = make_live_config(SYMBOLS, tmp_path, strategy="buy_and_hold", capital_limit=10_000.0)
+
+    unsettled = report.shadow.run_shadow(
+        config.strategy, config.params, config.universe, decision_date, decision_date,
+        initial_cash=config.capital_limit, data_dir=tmp_path,
+    )  # fmt: skip
+    assert unsettled.final_state is None or not unsettled.final_state.positions
+
+    settled_end = report._settle_end(decision_date, config.paper_ledger.window_sessions)
+    settled = report.shadow.run_shadow(
+        config.strategy, config.params, config.universe, decision_date, settled_end,
+        initial_cash=config.capital_limit, data_dir=tmp_path,
+    )  # fmt: skip
+    assert settled.final_state is not None and settled.final_state.positions
+
+
 def test_build_tracking_report_is_empty_shaped_with_no_decisions(tmp_path: Path) -> None:
     config = make_live_config(SYMBOLS, tmp_path, strategy="buy_and_hold")
     tracking = report.build_tracking_report(config, "2026-09", data_dir=tmp_path)

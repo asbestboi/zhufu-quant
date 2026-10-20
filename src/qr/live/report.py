@@ -13,13 +13,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 
+from qr import calendars
 from qr.live import journal, schedule, shadow
 from qr.live.config import LiveConfig
+from qr.live.cycle import ASSET_CLASS
 
 
 @dataclass(frozen=True)
@@ -161,6 +163,23 @@ class ConsistencyResult:
     mismatches: dict[str, tuple[float, float]]  # symbol -> (ledger qty, shadow qty)
 
 
+def _settle_end(this_date: date, window_sessions: int) -> date:
+    """``window_sessions`` trading sessions after ``this_date``.
+
+    The shadow backtest's own matching rebalance order, triggered on ``this_date``
+    itself (the last session of its window), only fills on a later session -- same as
+    the real paper ledger, which is exactly what this check compares against. Without
+    this, a shadow window ending right at the decision date would always show that
+    decision's position as unfilled, however it actually resolved for real.
+    """
+    buffer_days = window_sessions * 3 + 10  # generous enough for weekends/holidays
+    window = calendars.sessions(
+        ASSET_CLASS, this_date + timedelta(days=1), this_date + timedelta(days=buffer_days)
+    )
+    sessions = [pd.Timestamp(ts).date() for ts in window[:window_sessions]]
+    return sessions[-1] if sessions else this_date
+
+
 def consistency_check(
     config: LiveConfig,
     start: date,
@@ -168,7 +187,12 @@ def consistency_check(
     data_dir: Path | str | None = None,
     tolerance: float = 1e-6,
 ) -> ConsistencyResult:
-    """Compare the ledger's positions through ``end`` against a shadow backtest's."""
+    """Compare the ledger's positions through ``end`` against a shadow backtest's.
+
+    ``end`` should already give the shadow's own rebalance order (triggered on the last
+    session of its window) enough later sessions to fill -- see :func:`_settle_end`,
+    which `build_tracking_report` uses to compute it.
+    """
     ledger = _ledger_positions(config.strategy, config.capital_limit, data_dir)
     result = shadow.run_shadow(
         config.strategy, config.params, config.universe, start, end,
@@ -219,8 +243,9 @@ def build_tracking_report(
 
     first_date = pd.Timestamp(all_decisions["decision_date"].min()).date()
     this_date = pd.Timestamp(base.decisions["decision_date"].max()).date()
+    settle_end = _settle_end(this_date, config.paper_ledger.window_sessions)
 
-    consistency = consistency_check(config, first_date, this_date, data_dir=data_dir)
+    consistency = consistency_check(config, first_date, settle_end, data_dir=data_dir)
     ledger_curve = shadow.ledger_equity_curve(
         config.strategy, config.capital_limit, data_dir=data_dir
     )
