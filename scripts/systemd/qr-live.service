@@ -5,5 +5,9 @@ After=qr-ingest.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=/path/to/zhufu-quant
+# This must be the project whose venv has the strategy's own `qr` plugin installed and
+# registered -- for a private strategy (e.g. zhufu-research's `zr`), that is the private
+# repo itself, not zhufu-quant: `uv run qr` only sees strategies registered in the venv
+# it actually runs in (see the README's "qr.strategies entry point" note).
+WorkingDirectory=/path/to/the/project/whose/venv/has/this/strategy/registered
 ExecStart=/usr/bin/env uv run qr live run /path/to/live.yaml --catch-up

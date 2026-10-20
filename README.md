@@ -1021,7 +1021,11 @@ best-effort, and silently skipped if it isn't available (e.g. no graphical sessi
 #### Linux: a systemd user timer
 
 Unit files are in `scripts/systemd/`. Edit the paths inside, then install into
-`~/.config/systemd/user/`:
+`~/.config/systemd/user/`. `WorkingDirectory` must be the project whose venv has the
+strategy actually registered -- `uv run qr` only sees strategies installed in the venv
+it runs in, so a **private** strategy's timer needs `WorkingDirectory` set to that
+private repo (its own `pyproject.toml` depends on `qr` as an editable path dependency
+and declares the strategy's `qr.strategies` entry point), never `zhufu-quant` itself:
 
 ```
 cp scripts/systemd/qr-live.service scripts/systemd/qr-live.timer ~/.config/systemd/user/
@@ -1038,7 +1042,7 @@ After=qr-ingest.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=/path/to/zhufu-quant
+WorkingDirectory=/path/to/the/project/whose/venv/has/this/strategy/registered
 ExecStart=/usr/bin/env uv run qr live run /path/to/live.yaml --catch-up
 
 # qr-live.timer
