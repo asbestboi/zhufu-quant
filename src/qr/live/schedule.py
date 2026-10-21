@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 
@@ -50,7 +51,7 @@ def _sessions_since(day: date, latest: date) -> int:
     return calendars.sessions_between(ASSET_CLASS, day, latest)
 
 
-def _already_flagged(tag: str, did: str, data_dir: object) -> bool:
+def _already_flagged(tag: str, did: str, data_dir: Path | str | None) -> bool:
     alerts = journal.read_alerts(data_directory=data_dir)
     if alerts.empty:
         return False
@@ -68,7 +69,7 @@ def _latest_month_end(latest: date) -> date | None:
     return None
 
 
-def _went_live_by(config_name: str, deadline: date, data_dir: object) -> bool:
+def _went_live_by(config_name: str, deadline: date, data_dir: Path | str | None) -> bool:
     """Whether this config has a run on record at or before ``deadline``.
 
     Guards the never-run-month-end check below: a month-end that closed before this
@@ -88,7 +89,7 @@ def _went_live_by(config_name: str, deadline: date, data_dir: object) -> bool:
 
 
 def run_maintenance(
-    config: LiveConfig, data_dir: object = None, *, now: datetime | None = None
+    config: LiveConfig, data_dir: Path | str | None = None, *, now: datetime | None = None
 ) -> list[MaintenanceEvent]:
     """Expire stale unapproved plans, and flag month-ends nobody ever ran, as missed.
 

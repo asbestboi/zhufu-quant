@@ -23,6 +23,7 @@ from qr.backtest.costs import CostModel
 from qr.backtest.data import load_market_data
 from qr.backtest.event_engine import run_event
 from qr.backtest.strategies import build_strategy
+from qr.backtest.strategy import EventStrategy
 from qr.live import journal
 from qr.load import get_bars
 
@@ -56,6 +57,8 @@ def run_shadow(
     cost_config = costs or CostConfig()
     cost_model = CostModel(cost_config, data.symbols, data.asset_classes)
     impl = build_strategy(strategy, "event", params)
+    if not isinstance(impl, EventStrategy):
+        raise ValueError(f"'{strategy}' is not an event strategy; qr.live needs one")
     config = BacktestConfig(
         name="shadow", engine="event", strategy=strategy, params=params, universe=universe,
         start=start, end=end, initial_cash=initial_cash, benchmark=None, rebalance="monthly",

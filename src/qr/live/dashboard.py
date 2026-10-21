@@ -46,7 +46,7 @@ def _svg_chart(series: dict[str, pd.Series], width: int = 760, height: int = 320
     all_dates = sorted({pd.Timestamp(d).date() for s in clean.values() for d in s.index})
     x0, x1 = all_dates[0], all_dates[-1]
     span_days = max((x1 - x0).days, 1)
-    all_values = [v for s in clean.values() for v in s.to_numpy()]
+    all_values = [float(v) for s in clean.values() for v in s.to_numpy()]
     y_min, y_max = min(all_values), max(all_values)
     y_range = (y_max - y_min) or 1.0
     pad = 44
@@ -68,7 +68,8 @@ def _svg_chart(series: dict[str, pd.Series], width: int = 760, height: int = 320
     for i, (name, s) in enumerate(clean.items()):
         colour = _COLOURS[i % len(_COLOURS)]
         points = " ".join(
-            f"{x_of(pd.Timestamp(d).date()):.1f},{y_of(float(v)):.1f}" for d, v in s.items()
+            f"{x_of(pd.Timestamp(d).date()):.1f},{y_of(float(v)):.1f}"  # type: ignore[arg-type]
+            for d, v in s.items()
         )
         parts.append(
             f'<polyline fill="none" stroke="{colour}" stroke-width="2" points="{points}"/>'
