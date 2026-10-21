@@ -1029,7 +1029,7 @@ and declares the strategy's `qr.strategies` entry point), never `zhufu-quant` it
 
 ```
 cp scripts/systemd/qr-live.service scripts/systemd/qr-live.timer ~/.config/systemd/user/
-# edit WorkingDirectory and the live.yaml path in qr-live.service
+# edit WorkingDirectory, the uv path, and the live.yaml path in qr-live.service
 systemctl --user daemon-reload
 systemctl --user enable --now qr-live.timer
 ```
@@ -1043,7 +1043,7 @@ After=qr-ingest.service
 [Service]
 Type=oneshot
 WorkingDirectory=/path/to/the/project/whose/venv/has/this/strategy/registered
-ExecStart=/usr/bin/env uv run qr live run /path/to/live.yaml --catch-up
+ExecStart=/path/to/uv run qr live run /path/to/live.yaml --catch-up
 
 # qr-live.timer
 [Timer]
@@ -1052,6 +1052,11 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 ```
+
+Use `uv`'s real path, not a plain `uv` or `/usr/bin/env uv`: `systemd --user`'s own PATH
+is not your shell's, and the standalone installer's default (`~/.local/bin`) is usually
+not on it, so `ExecStart` silently fails to find it otherwise. Check with `which uv` and
+`systemctl --user show-environment | grep PATH`.
 
 `Persistent=true` means a run that was missed because the machine was off fires as soon
 as it's back on -- combined with `--catch-up` and the 3-trading-day window above, this is

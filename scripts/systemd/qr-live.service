@@ -10,4 +10,8 @@ Type=oneshot
 # repo itself, not zhufu-quant: `uv run qr` only sees strategies registered in the venv
 # it actually runs in (see the README's "qr.strategies entry point" note).
 WorkingDirectory=/path/to/the/project/whose/venv/has/this/strategy/registered
-ExecStart=/usr/bin/env uv run qr live run /path/to/live.yaml --catch-up
+# A plain `uv` (no path) can fail silently here: systemd --user's own PATH is not your
+# shell's, and the standalone installer's default (~/.local/bin) is usually not on it
+# -- check with `systemctl --user show-environment | grep PATH` and use `which uv`'s
+# output below if it's missing.
+ExecStart=/path/to/uv run qr live run /path/to/live.yaml --catch-up
