@@ -8,7 +8,7 @@ from pathlib import Path
 
 from qr import calendars
 from qr.live import dashboard, journal
-from qr.live.config import BenchmarkConfig
+from qr.live.config import BacktestReferenceConfig, BenchmarkConfig
 
 from .live_config import make_live_config
 from .live_store import real_session_bars, seed_store
@@ -78,6 +78,33 @@ def test_live_preview_labels_a_real_month_end_session_as_the_real_decision(
 
     page = dashboard.build_dashboard_html(config, data_dir=tmp_path)
     assert "this month&#x27;s real decision" in page
+
+
+def test_backtest_reference_renders_its_own_chart_when_configured(tmp_path: Path) -> None:
+    """A config with ``backtest_reference`` set gets a second, clearly-labelled chart
+    of that fixed historical window -- real curves to look at before the live one has
+    any history of its own."""
+    start, end = date(2022, 11, 1), date(2023, 2, 15)
+    bars = {s: real_session_bars(start, end, seed=i) for i, s in enumerate(SYMBOLS)}
+    seed_store(tmp_path, bars)
+    config = make_live_config(
+        SYMBOLS, tmp_path, strategy="buy_and_hold", capital_limit=10_000.0,
+        benchmark=BenchmarkConfig(strategy="buy_and_hold", params={}),
+        backtest_reference=BacktestReferenceConfig(
+            start=start, end=end, label="Sealed test (disclosed)"
+        ),
+    )  # fmt: skip
+
+    page = dashboard.build_dashboard_html(config, data_dir=tmp_path)
+    assert "Sealed test (disclosed)" in page
+    assert "already-disclosed historical backtest, not live paper money" in page
+    assert "buy_and_hold (backtest)" in page
+
+
+def test_no_backtest_reference_chart_when_not_configured(tmp_path: Path) -> None:
+    config = make_live_config(SYMBOLS, tmp_path, strategy="buy_and_hold")
+    page = dashboard.build_dashboard_html(config, data_dir=tmp_path)
+    assert "backtest" not in page.lower()
 
 
 def test_write_dashboard_creates_the_file(tmp_path: Path) -> None:

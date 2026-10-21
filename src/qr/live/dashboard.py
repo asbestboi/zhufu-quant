@@ -5,8 +5,13 @@ static file refreshed on disk, not a server. The page itself reloads every
 `AUTO_REFRESH_SECONDS` while left open, so a browser tab left on it picks up the next
 regeneration (at most once a day, since the strategy only ever rebalances once a month
 and the underlying bars are daily) without a manual refresh. No network calls and no
-external assets of any kind: the equity-curve chart is a hand-drawn inline SVG, so the
-file always opens correctly straight from disk, offline, forever.
+external assets of any kind: every chart is a hand-drawn inline SVG, so the file always
+opens correctly straight from disk, offline, forever.
+
+If the config sets ``backtest_reference``, a second chart shows that already-disclosed
+historical window (e.g. the candidate's own sealed test) next to its benchmark -- real
+curves to look at before the live one has any history, never re-run or extended, and
+never a new look at data the study hasn't already seen.
 """
 
 from __future__ import annotations
@@ -156,6 +161,34 @@ def build_dashboard_html(config: LiveConfig, data_dir: Path | str | None = None)
             )  # fmt: skip
             series[f"{config.benchmark.strategy} (shadow)"] = benchmark_shadow.equity
 
+    reference_chart: str | None = None
+    if config.backtest_reference is not None:
+        ref = config.backtest_reference
+        reference_series = {}
+        candidate_ref = shadow.run_shadow(
+            config.strategy, config.params, config.universe, ref.start, ref.end,
+            initial_cash=config.capital_limit, data_dir=data_dir,
+        )  # fmt: skip
+        reference_series[f"{config.strategy} (backtest)"] = candidate_ref.equity
+        if config.benchmark is not None:
+            benchmark_ref = shadow.run_shadow(
+                config.benchmark.strategy, config.benchmark.params, config.universe,
+                ref.start, ref.end, initial_cash=config.capital_limit, data_dir=data_dir,
+            )  # fmt: skip
+            reference_series[f"{config.benchmark.strategy} (backtest)"] = benchmark_ref.equity
+        reference_chart = (
+            f'<p class="meta">{html.escape(ref.label)}, {ref.start.isoformat()} to '
+            f"{ref.end.isoformat()} -- already-disclosed historical backtest, not live "
+            "paper money. Shown for context: this is where the candidate and benchmark "
+            "diverged in the past, not a forecast of what happens next.</p>"
+            + _svg_chart(reference_series)
+        )
+    reference_section = (
+        f"<h2>{html.escape(config.backtest_reference.label)}</h2>{reference_chart}"
+        if reference_chart and config.backtest_reference is not None
+        else ""
+    )
+
     position_rows = []
     for symbol, qty in sorted(quantities.items()):
         value = qty * prices.get(symbol, 0.0)
@@ -256,7 +289,7 @@ Cash: ${cash:,.2f}. Equity: ${equity:,.2f}.</p>
 
 <h2>Live preview</h2>
 {preview_html}
-
+{reference_section}
 <h2>Equity curve</h2>
 {chart}
 

@@ -8,6 +8,7 @@ symbols it decides on.
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 
@@ -67,6 +68,17 @@ class BenchmarkConfig(_Model):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class BacktestReferenceConfig(_Model):
+    """A fixed, already-disclosed historical window to show on the dashboard for
+    context (e.g. this candidate's own sealed-test period) -- purely illustrative,
+    never re-run as part of a live decision and never a new look at held-out data.
+    """
+
+    start: date
+    end: date
+    label: str = "Backtest track record"
+
+
 class LiveConfig(_Model):
     """Everything that defines one paper-trading strategy's monthly cycle."""
 
@@ -81,6 +93,9 @@ class LiveConfig(_Model):
     # A shadow-only comparison for the monthly tracking report (qr.live.report) and the
     # dashboard -- never traded, never sized, never checked for safety.
     benchmark: BenchmarkConfig | None = None
+    # Shown on the dashboard only, next to the live equity curve -- see
+    # BacktestReferenceConfig.
+    backtest_reference: BacktestReferenceConfig | None = None
     initial_cash: float = Field(default=100_000.0, gt=0)  # sim broker's starting cash only
     # The account's *managed* capital, in its base currency: qr.live plans, checks, and
     # reports against this number, never the account's total equity. A paper account is
