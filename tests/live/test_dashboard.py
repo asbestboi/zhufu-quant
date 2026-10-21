@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+from qr import calendars
 from qr.live import dashboard, journal
 from qr.live.config import BenchmarkConfig
 
@@ -47,6 +48,36 @@ def test_dashboard_after_a_decision_shows_positions_orders_and_a_chart(tmp_path:
     assert "buy_and_hold (shadow)" in page
     assert "O1" not in page  # order ids aren't shown, just their decision/symbol/status
     assert "filled" in page
+
+
+def test_live_preview_shows_todays_target_weights_before_any_real_decision(
+    tmp_path: Path,
+) -> None:
+    """The preview is computable, and clearly labelled, with no decision ever journaled --
+    this is what makes it useful day to day instead of waiting for the next month-end."""
+    start, end = date(2022, 11, 1), date(2023, 2, 15)  # a Wednesday, not a month-end
+    bars = {s: real_session_bars(start, end, seed=i) for i, s in enumerate(SYMBOLS)}
+    seed_store(tmp_path, bars)
+    config = make_live_config(SYMBOLS, tmp_path, strategy="buy_and_hold", capital_limit=10_000.0)
+
+    page = dashboard.build_dashboard_html(config, data_dir=tmp_path)
+    assert "Live preview" in page
+    assert "not a real decision" in page
+    assert "Next scheduled decision" in page
+    assert "target weight" in page
+    assert "AAA" in page and "BBB" in page
+
+
+def test_live_preview_labels_a_real_month_end_session_as_the_real_decision(
+    tmp_path: Path,
+) -> None:
+    end = calendars.sessions("etf", date(2023, 1, 1), date(2023, 1, 31))[-1].date()
+    bars = {s: real_session_bars(date(2022, 11, 1), end, seed=i) for i, s in enumerate(SYMBOLS)}
+    seed_store(tmp_path, bars)
+    config = make_live_config(SYMBOLS, tmp_path, strategy="buy_and_hold", capital_limit=10_000.0)
+
+    page = dashboard.build_dashboard_html(config, data_dir=tmp_path)
+    assert "this month&#x27;s real decision" in page
 
 
 def test_write_dashboard_creates_the_file(tmp_path: Path) -> None:

@@ -1,24 +1,31 @@
 """A self-contained local HTML dashboard for one live strategy.
 
 Regenerated after every `qr live run` / `qr live approve` (see `qr.cli`) -- a plain
-static file refreshed on disk, not a server, with no refresh loop of its own. No network
-calls and no external assets of any kind: the equity-curve chart is a hand-drawn inline
-SVG, so the file always opens correctly straight from disk, offline, forever.
+static file refreshed on disk, not a server. The page itself reloads every
+`AUTO_REFRESH_SECONDS` while left open, so a browser tab left on it picks up the next
+regeneration (at most once a day, since the strategy only ever rebalances once a month
+and the underlying bars are daily) without a manual refresh. No network calls and no
+external assets of any kind: the equity-curve chart is a hand-drawn inline SVG, so the
+file always opens correctly straight from disk, offline, forever.
 """
 
 from __future__ import annotations
 
 import html
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 
+from qr import calendars
 from qr.config import data_dir as resolve_data_dir
 from qr.live import journal, shadow
 from qr.live.config import LiveConfig
+from qr.live.cycle import ASSET_CLASS, is_month_end
+from qr.live.decide import DecisionError, target_weights
 
 _COLOURS = ["#2563eb", "#dc2626", "#16a34a", "#9333ea"]
+AUTO_REFRESH_SECONDS = 300
 
 
 def dashboard_path(config: LiveConfig, data_dir: Path | str | None = None) -> Path:
@@ -69,6 +76,16 @@ def _svg_chart(series: dict[str, pd.Series], width: int = 760, height: int = 320
     return "".join(parts)
 
 
+def _next_month_end(after: date) -> date | None:
+    """The next month-end session strictly after ``after``, if the calendar has one soon."""
+    window = calendars.sessions(ASSET_CLASS, after, after + timedelta(days=65))
+    for raw in window:
+        day = pd.Timestamp(raw).date()
+        if day > after and is_month_end(day):
+            return day
+    return None
+
+
 def _table(headers: list[str], rows: list[list[str]]) -> str:
     if not rows:
         return "<p>None yet.</p>"
@@ -87,15 +104,38 @@ def build_dashboard_html(config: LiveConfig, data_dir: Path | str | None = None)
     decisions = journal.read_decisions(config.strategy, data_directory=data_dir)
     as_of = pd.Timestamp.now()
     cash, quantities = shadow.ledger_state(config.strategy, config.capital_limit, data_dir=data_dir)
-    prices: dict[str, float] = {}
-    if quantities:
-        from qr.load import get_bars
 
-        bars = get_bars(list(quantities), end=date.today(), adjustment="none", data_dir=data_dir)
-        if not bars.empty:
-            closes = bars["close"].groupby(level="symbol").last()
-            prices = {s: float(closes[s]) for s in quantities if s in closes.index}
+    from qr.load import get_bars
+    from qr.storage import StorageError
+
+    try:
+        universe_bars = get_bars(
+            config.universe, end=date.today(), adjustment="none", data_dir=data_dir
+        )
+    except StorageError:
+        universe_bars = pd.DataFrame()
+    prices: dict[str, float] = {}
+    latest_session: date | None = None
+    if not universe_bars.empty:
+        closes = universe_bars["close"].groupby(level="symbol").last()
+        prices = {s: float(closes[s]) for s in quantities if s in closes.index}
+        latest_session = pd.Timestamp(universe_bars.index.get_level_values("date").max()).date()
     equity = cash + sum(quantities[s] * prices.get(s, 0.0) for s in quantities)
+
+    preview_weights: dict[str, float] = {}
+    preview_error: str | None = None
+    next_decision: date | None = None
+    if latest_session is not None:
+        try:
+            preview_weights = target_weights(
+                config.strategy, config.params, config.universe, latest_session,
+                data_dir=data_dir,
+            )  # fmt: skip
+        except DecisionError as exc:
+            preview_error = str(exc)
+        next_decision = (
+            latest_session if is_month_end(latest_session) else _next_month_end(latest_session)
+        )
 
     ledger_curve = shadow.ledger_equity_curve(
         config.strategy, config.capital_limit, data_dir=data_dir
@@ -173,10 +213,31 @@ def build_dashboard_html(config: LiveConfig, data_dir: Path | str | None = None)
                  f"{tracking.reliability.missed}/{tracking.reliability.due}"]
             )  # fmt: skip
 
+    preview_rows = [[symbol, f"{weight:.1%}"] for symbol, weight in sorted(preview_weights.items())]
+    if preview_error is not None:
+        preview_html = f"<p>Can't compute a preview yet: {html.escape(preview_error)}</p>"
+    elif latest_session is None:
+        preview_html = "<p>No market data yet.</p>"
+    else:
+        is_real = next_decision == latest_session
+        label = "this month's real decision" if is_real else "not a real decision"
+        note = (
+            ""
+            if is_real
+            else f" Next scheduled decision: "
+            f"{next_decision.isoformat() if next_decision else 'unknown'}."
+        )
+        preview_html = (
+            f'<p class="meta">As of the {latest_session.isoformat()} close -- '
+            f"{html.escape(label)}.{html.escape(note)}</p>"
+            + _table(["symbol", "target weight"], preview_rows)
+        )
+
     chart = _svg_chart(series)
     strategy_html = html.escape(config.strategy)
     return f"""<!doctype html>
 <html><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="{AUTO_REFRESH_SECONDS}">
 <title>{html.escape(config.name)} -- paper trading dashboard</title>
 <style>
 body {{ font-family: -apple-system, system-ui, sans-serif; margin: 2rem; color: #111; }}
@@ -189,8 +250,12 @@ table.data th {{ background: #f3f4f6; text-align: left; }}
 </style></head>
 <body>
 <h1>{html.escape(config.name)} ({strategy_html})</h1>
-<p class="meta">Generated {as_of:%Y-%m-%d %H:%M}. Broker: {html.escape(config.broker)}.
+<p class="meta">Generated {as_of:%Y-%m-%d %H:%M}, refreshes every {AUTO_REFRESH_SECONDS // 60}
+minutes while open. Broker: {html.escape(config.broker)}.
 Cash: ${cash:,.2f}. Equity: ${equity:,.2f}.</p>
+
+<h2>Live preview</h2>
+{preview_html}
 
 <h2>Equity curve</h2>
 {chart}
