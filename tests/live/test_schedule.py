@@ -55,6 +55,12 @@ def test_expiring_the_same_plan_twice_does_not_duplicate_the_alert(tmp_path: Pat
 
 def test_a_month_end_nobody_ever_ran_is_flagged_once(tmp_path: Path) -> None:
     config = _config(tmp_path)
+    # The system was already live well before the close -- a run on record a month
+    # earlier -- so this close really was missed, not just never watched.
+    journal.record_run(
+        "R0", config.name, dry_run=False, catch_up=False,
+        started_at=datetime(2026, 8, 15), data_directory=tmp_path,
+    )  # fmt: skip
     # No decision row at all for the 2026-09-30 close.
     events = schedule.run_maintenance(config, tmp_path, now=datetime(2026, 10, 7))
     assert len(events) == 1
@@ -62,6 +68,17 @@ def test_a_month_end_nobody_ever_ran_is_flagged_once(tmp_path: Path) -> None:
 
     again = schedule.run_maintenance(config, tmp_path, now=datetime(2026, 10, 8))
     assert again == []  # deduped against the alert already written
+
+
+def test_a_month_end_before_the_systems_first_ever_run_is_not_flagged(tmp_path: Path) -> None:
+    """Regression: a real production incident. The system's very first invocation,
+    run any time after a real month-end that predates the deployment entirely, must
+    not retroactively call that month-end a miss -- there was no system yet to miss it."""
+    config = _config(tmp_path)
+    # No run recorded at all -- this *is* the system's first ever invocation, and
+    # 2026-09-30 already closed weeks before it.
+    events = schedule.run_maintenance(config, tmp_path, now=datetime(2026, 10, 21))
+    assert events == []
 
 
 def test_a_submitted_decision_running_late_is_flagged_but_not_touched(tmp_path: Path) -> None:

@@ -68,6 +68,25 @@ def _latest_month_end(latest: date) -> date | None:
     return None
 
 
+def _went_live_by(config_name: str, deadline: date, data_dir: object) -> bool:
+    """Whether this config has a run on record at or before ``deadline``.
+
+    Guards the never-run-month-end check below: a month-end that closed before this
+    config's very first ever run is not a missed decision -- there was no deployment
+    yet to miss it (true on literally the system's first invocation, however long after
+    a real month-end that happens to land). Only a month-end the system was already
+    live for, and still let lapse, counts.
+    """
+    runs = journal.read_runs(data_directory=data_dir)
+    if runs.empty:
+        return False
+    mine = runs[runs["config_name"] == config_name]
+    if mine.empty:
+        return False
+    earliest = pd.Timestamp(mine["started_at"].min()).date()
+    return earliest <= deadline
+
+
 def run_maintenance(
     config: LiveConfig, data_dir: object = None, *, now: datetime | None = None
 ) -> list[MaintenanceEvent]:
@@ -114,6 +133,7 @@ def run_maintenance(
         month_end is not None
         and month_end not in seen_dates
         and _sessions_since(month_end, latest) > MISSED_RUN_SESSIONS
+        and _went_live_by(config.name, month_end, data_dir)
     ):
         did = journal.decision_id(config.strategy, month_end)
         if not _already_flagged(MISSED_TAG, did, data_dir):
